@@ -282,6 +282,13 @@ impl<const R: usize> StdRibbon<R> {
         let hashes: Vec<u64> = items.iter().map(crate::hash_key).collect();
         Self::from_keys_pleated(&hashes)
     }
+    /// Build with slot-range parallel banding under the seed-retry loop (bit-identical to
+    /// [`StdRibbon::from_keys`]). Requires the `parallel` feature.
+    #[cfg(feature = "parallel")]
+    pub fn from_keys_parallel(keys: &[u64], threads: usize) -> Option<Self> {
+        crate::banding128::build_std128_parallel::<R>(keys, DEFAULT_WINDOW_SHIFT, threads)
+            .map(|soln| Self { soln })
+    }
     #[inline]
     pub fn contains(&self, key: u64) -> bool {
         self.soln.contains(key)
@@ -326,6 +333,22 @@ mod std128_tests {
                 "std128 pleated diverges from arrival at n={n}"
             );
             assert!(k.iter().all(|&x| p.contains(x)), "std128 false negative n={n}");
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn std128_parallel_is_bit_identical_to_arrival() {
+        let k = keys(300_000);
+        let a = StdRibbon::<7>::from_keys(&k).unwrap();
+        for t in [2usize, 4, 8] {
+            let p = StdRibbon::<7>::from_keys_parallel(&k, t).unwrap();
+            assert_eq!(
+                solution_fnv_128(a.soln.segments()),
+                solution_fnv_128(p.soln.segments()),
+                "std128 parallel (t={t}) diverges"
+            );
+            assert!(k.iter().all(|&x| p.contains(x)), "std128 parallel false negative t={t}");
         }
     }
 

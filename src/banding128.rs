@@ -39,6 +39,11 @@ impl<const R: usize> Banding128<R> {
         self.raw_seed = ordinal_to_raw_seed(ordinal);
     }
 
+    #[cfg(feature = "parallel")]
+    fn coeff_result_mut(&mut self) -> (&mut [u128], &mut [u32]) {
+        (&mut self.coeff_rows, &mut self.result_rows)
+    }
+
     /// One key by Gaussian reduction (BandingAdd). Returns false on an inconsistent dependence
     /// (cr reduces to 0 with a nonzero result row) — the construction-failure signal.
     fn add(&mut self, key: u64) -> bool {
@@ -200,6 +205,133 @@ pub fn build_std128_pleated<const R: usize>(
 ) -> Option<Solution128<R>> {
     let num_slots = num_slots_for_128(keys.len(), R);
     Banding128::<R>::find_seed_pleated(num_slots, keys, window_shift).map(Banding128::into_solution)
+}
+
+/// Build a w=128 standard ribbon filter with slot-range parallel banding + boundary deferral,
+/// under the seed-retry loop. Bit-identical to [`build_std128`]. Requires the `parallel`
+/// feature. Falls back to sequential for `threads <= 1`.
+#[cfg(feature = "parallel")]
+pub fn build_std128_parallel<const R: usize>(
+    keys: &[u64],
+    window_shift: u32,
+    threads: usize,
+) -> Option<Solution128<R>> {
+    use std::thread;
+    const G: usize = 1 << 14;
+
+    let num_slots = num_slots_for_128(keys.len(), R);
+    if threads <= 1 || num_slots / W128 < 2 {
+        return build_std128_pleated::<R>(keys, window_shift);
+    }
+    let mut b = Banding128::<R>::new(num_slots);
+    let num_starts = b.num_starts;
+    let window = 1usize << window_shift;
+    let n_windows = num_slots.div_ceil(window);
+    let threads = threads.min(n_windows);
+
+    'seed: for ordinal in 0..SEED_COUNT {
+        b.reset(ordinal);
+        let raw = b.raw_seed as u64;
+        // Thread range bounds, window-aligned at ~equal key counts is overkill; even windows.
+        let per = n_windows.div_ceil(threads);
+        let mut bounds: Vec<usize> = (0..=threads).map(|t| (t * per * window).min(num_slots)).collect();
+        bounds.dedup();
+        let nt = bounds.len() - 1;
+
+        let mut buckets: Vec<Vec<u64>> = vec![Vec::new(); nt];
+        let mut deferred: Vec<u64> = Vec::new();
+        for &k in keys {
+            let s = start(ribbon_hash(k, raw), num_starts) as usize;
+            let t = bounds.partition_point(|&x| x <= s) - 1;
+            if t + 1 < nt && s + G >= bounds[t + 1] {
+                deferred.push(k);
+            } else {
+                buckets[t].push(k);
+            }
+        }
+
+        // Split both matrices into per-thread window-aligned slices.
+        let (coeff_all, result_all) = b.coeff_result_mut();
+        let mut cslices: Vec<(usize, &mut [u128])> = Vec::with_capacity(nt);
+        let mut rslices: Vec<&mut [u32]> = Vec::with_capacity(nt);
+        let mut crest = &mut coeff_all[..];
+        let mut rrest = &mut result_all[..];
+        let mut base = 0usize;
+        for t in 0..nt {
+            let len = bounds[t + 1] - bounds[t];
+            let (ch, ct) = crest.split_at_mut(len);
+            let (rh, rt) = rrest.split_at_mut(len);
+            cslices.push((base, ch));
+            rslices.push(rh);
+            crest = ct;
+            rrest = rt;
+            base += len;
+        }
+
+        // Parallel band; a thread returns false if any key hits an inconsistent dependence.
+        let ok = thread::scope(|scope| {
+            let handles: Vec<_> = cslices
+                .into_iter()
+                .zip(rslices)
+                .zip(&buckets)
+                .map(|(((cbase, cs), rs), bk)| {
+                    scope.spawn(move || band_range_128::<R>(cs, rs, cbase, num_starts, raw, bk))
+                })
+                .collect();
+            handles.into_iter().all(|h| h.join().unwrap())
+        });
+        if !ok {
+            continue 'seed;
+        }
+        // Sequential tail: deferred keys over the whole matrix.
+        for &k in &deferred {
+            if !b.add(k) {
+                continue 'seed;
+            }
+        }
+        return Some(b.into_solution());
+    }
+    None
+}
+
+/// Band `keys` into `(coeff, result)` slices for global slots `[base, base+len)`. Every key is
+/// guaranteed by the deferral margin to reduce within the slice. Returns false on an
+/// inconsistent dependence.
+#[cfg(feature = "parallel")]
+fn band_range_128<const R: usize>(
+    coeff: &mut [u128],
+    result: &mut [u32],
+    base: usize,
+    num_starts: u64,
+    raw: u64,
+    keys: &[u64],
+) -> bool {
+    for &k in keys {
+        let h = ribbon_hash(k, raw);
+        let mut i = start(h, num_starts) as usize - base;
+        let mut cr = coeff_row_128(h);
+        let mut rr = result_row(h);
+        loop {
+            let cr_at_i = coeff[i];
+            if cr_at_i == 0 {
+                coeff[i] = cr;
+                result[i] = rr;
+                break;
+            }
+            cr ^= cr_at_i;
+            rr ^= result[i];
+            if cr == 0 {
+                if rr != 0 {
+                    return false;
+                }
+                break;
+            }
+            let tz = cr.trailing_zeros() as usize;
+            i += tz;
+            cr >>= tz;
+        }
+    }
+    true
 }
 
 /// Serialize a solution: `[ordinal_seed u32][num_starts u64]` then the u128 segments (LE).
