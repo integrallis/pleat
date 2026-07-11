@@ -1,9 +1,10 @@
 name: Publish
 
 # Manual, on-demand publish to crates.io. Nothing publishes automatically — a maintainer
-# triggers this from the Actions tab (Run workflow) after review. Uses the CARGO_REGISTRY_TOKEN
-# repository secret. The full quality gate (fmt, clippy, tests incl. the differential gate, doc)
-# must pass before `cargo publish` runs, so a broken build can never ship.
+# triggers this from the Actions tab (Run workflow) after review, and a real publish additionally
+# requires the protected `crates-io` environment (configure required reviewers on it in repo
+# settings). Defaults to dry-run. The full quality gate must pass first, and a real publish
+# verifies the git tag matches the crate version so only tagged releases can ship.
 
 on:
   workflow_dispatch:
@@ -13,11 +14,16 @@ on:
         type: boolean
         default: true
 
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A real (non-dry-run) publish runs in the protected environment; a dry-run does not need it.
+    environment: ${{ inputs.dry_run && '' || 'crates-io' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -25,20 +31,32 @@ jobs:
 
       - name: Format check
         run: cargo fmt --check
-
-      - name: Clippy (deny warnings)
+      - name: Clippy (all features, deny warnings)
         run: cargo clippy --all-features --all-targets -- -D warnings
-
+      - name: Clippy (no default features, deny warnings)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
       - name: Tests (includes the reference differential gate)
         run: cargo test --all-features
-
       - name: Docs (deny warnings)
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
-
       - name: Package check
         run: cargo package --all-features
+
+      - name: Verify tag matches crate version (real publish only)
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::Real publish must run from a version tag (e.g. v0.1.0), not a branch."
+            exit 1
+          fi
+          crate_ver=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate_ver" != "$tag" ]; then
+            echo "::error::Tag ($tag) does not match Cargo.toml version ($crate_ver)."
+            exit 1
+          fi
 
       - name: Publish (dry run)
         if: ${{ inputs.dry_run }}

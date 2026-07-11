@@ -1,4 +1,3 @@
 target/
-Cargo.lock
 tools/vecgen
 tools/vecgen128

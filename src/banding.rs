@@ -1,3 +1,9 @@
+// Portions of this file are a Rust port of the ribbon filter kernel from
+// fastfilter_cpp (https://github.com/FastFilter/fastfilter_cpp), whose ribbon
+// implementation derives from RocksDB (https://github.com/facebook/rocksdb),
+// both Apache-2.0. Algorithm, constants, and layout are transcribed from those
+// sources (see PORT_NOTES.md and the per-item file:line references); this port
+// is licensed MIT OR Apache-2.0 with attribution to the upstream authors.
 //! Homogeneous ribbon banding and interleaved back-substitution (w=64, r=7).
 //!
 //! Ported from the reference `BandingAdd` / `InterleavedBackSubst` / `BackSubstBlock`

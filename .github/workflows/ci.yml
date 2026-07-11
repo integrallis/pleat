@@ -1,20 +1,48 @@
 name: CI
 on: [push, pull_request]
+
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: fmt
+      - name: Format check
         run: cargo fmt --check
-      - name: clippy
+      - name: Clippy (all features, deny warnings)
         run: cargo clippy --all-features --all-targets -- -D warnings
-      - name: test
+      - name: Clippy (no default features, deny warnings)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - name: Test (all features)
         run: cargo test --all-features
-      - name: doc
+      - name: Test (no default features)
+        run: cargo test --no-default-features
+      - name: Doc (deny warnings)
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@1.87.0
+      - name: Build on MSRV (1.87)
+        run: cargo build --all-features
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
