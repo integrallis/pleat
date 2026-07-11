@@ -47,7 +47,7 @@ impl RibbonFilter {
     }
 
     /// Build with pleated construction: one counting pass folds keys into window order, then
-    /// bands. Produces the identical filter to [`from_keys`], faster at scale.
+    /// bands. Produces the identical filter to [`RibbonFilter::from_keys`], faster at scale.
     pub fn from_keys_pleated(keys: &[u64]) -> Self {
         Self::from_keys_pleated_seeded(keys, 0, DEFAULT_WINDOW_SHIFT)
     }
@@ -91,7 +91,7 @@ impl RibbonFilter {
         out
     }
 
-    /// Reconstruct a filter from [`to_bytes`]. Returns `None` on a malformed buffer.
+    /// Reconstruct a filter from [`RibbonFilter::to_bytes`]. Returns `None` on a malformed buffer.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 16 || !(bytes.len() - 16).is_multiple_of(8) {
             return None;
@@ -121,7 +121,7 @@ pub use parallel::from_keys_parallel_seeded;
 #[cfg(feature = "parallel")]
 impl RibbonFilter {
     /// Build with slot-range parallel banding (boundary keys deferred to a sequential tail).
-    /// Produces the identical filter to [`from_keys`]. Requires the `parallel` feature.
+    /// Produces the identical filter to [`RibbonFilter::from_keys`]. Requires the `parallel` feature.
     pub fn from_keys_parallel(keys: &[u64], threads: usize) -> Self {
         Self::from_keys_parallel_seeded(keys, 0, DEFAULT_WINDOW_SHIFT, threads)
     }
