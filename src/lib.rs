@@ -10,6 +10,18 @@ pub mod hash128;
 pub mod banding;
 pub mod banding128;
 pub mod filter;
+
+use core::hash::Hash;
+use xxhash_rust::xxh3::Xxh3;
+
+/// Hash an arbitrary key to the `u64` the filter operates on, using a fixed-seed xxh3 so results
+/// are stable across runs and machines. Build and query must use the same mapping — the
+/// `*_hashable` filter methods do this for you.
+pub fn hash_key<K: Hash + ?Sized>(key: &K) -> u64 {
+    let mut h = Xxh3::with_seed(0);
+    key.hash(&mut h);
+    core::hash::Hasher::finish(&h)
+}
 /// A pleating plan: how a key stream is folded into table-window order.
 ///
 /// `shift` selects the window size in slots (`1 << shift`); the paper's registered

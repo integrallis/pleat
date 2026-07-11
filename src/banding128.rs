@@ -279,23 +279,36 @@ mod tests {
         r[a + 1..b].split(',').filter_map(|t| t.trim().parse().ok()).collect()
     }
 
-    #[test]
-    fn w128_build_and_query_match_reference() {
-        let j = load();
-        let n = num(&j, "n") as usize;
+    fn by_r(j: &str, r: usize) -> &str {
+        let k = format!("\"{r}\":");
+        let i = j.find("\"by_r\"").unwrap();
+        let start = j[i..].find(&k).unwrap() + i + k.len();
+        &j[start..]
+    }
+
+    fn gate<const R: usize>(j: &str, r: usize) {
+        let obj = by_r(j, r);
+        let n = num(&j[j.find("\"build_n\"").unwrap()..], "build_n") as usize;
         let bk = keys(n, 0xA11CE);
-        let soln = build_std128::<7>(&bk).expect("solves");
-
-        assert_eq!(soln.ordinal_seed() as u64, num(&j, "chosen_ordinal_seed"), "seed differs");
-        assert_eq!(solution_fnv_128(soln.segments()), num(&j, "soln_fnv"), "fingerprint differs");
-
-        for (i, &want) in bits(&j, "present").iter().enumerate() {
-            assert_eq!(soln.contains(bk[i * 37 % n]) as u8, want, "present {i}");
+        let soln = build_std128::<R>(&bk).expect("solves");
+        assert_eq!(soln.ordinal_seed() as u64, num(obj, "chosen_ordinal_seed"), "seed r={r}");
+        assert_eq!(solution_fnv_128(soln.segments()), num(obj, "soln_fnv"), "fingerprint r={r}");
+        for (i, &want) in bits(obj, "present").iter().enumerate() {
+            assert_eq!(soln.contains(bk[i * 37 % n]) as u8, want, "present r={r} i={i}");
         }
         let ak = keys(200, 0xD15EA5E);
-        for (i, &want) in bits(&j, "absent").iter().enumerate() {
-            assert_eq!(soln.contains(ak[i] ^ 0x5555_5555_5555_5555) as u8, want, "absent {i}");
+        for (i, &want) in bits(obj, "absent").iter().enumerate() {
+            assert_eq!(soln.contains(ak[i] ^ 0x5555_5555_5555_5555) as u8, want, "absent r={r} i={i}");
         }
-        assert!(bk.iter().all(|&k| soln.contains(k)), "false negative");
+        assert!(bk.iter().all(|&k| soln.contains(k)), "false negative r={r}");
+    }
+
+    #[test]
+    fn w128_build_and_query_match_reference_all_r() {
+        let j = load();
+        gate::<5>(&j, 5);
+        gate::<7>(&j, 7);
+        gate::<8>(&j, 8);
+        gate::<10>(&j, 10);
     }
 }

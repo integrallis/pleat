@@ -71,10 +71,23 @@ impl<const R: usize> Ribbon<R> {
         Self { soln: b.solve() }
     }
 
+    /// Build from arbitrary hashable items (each hashed to `u64` via [`crate::hash_key`]),
+    /// with pleated construction.
+    pub fn from_hashable<K: core::hash::Hash>(items: &[K]) -> Self {
+        let hashes: Vec<u64> = items.iter().map(crate::hash_key).collect();
+        Self::from_keys_pleated(&hashes)
+    }
+
     /// Is `key` possibly in the set? Never a false negative; ~0.8% false-positive rate.
     #[inline]
     pub fn contains(&self, key: u64) -> bool {
         self.soln.contains(key)
+    }
+
+    /// Query an arbitrary hashable item (hashed the same way as [`Ribbon::from_hashable`]).
+    #[inline]
+    pub fn contains_hashable<K: core::hash::Hash>(&self, item: &K) -> bool {
+        self.soln.contains(crate::hash_key(item))
     }
 
     /// Serialized solution size in bytes (the queryable payload; keys are not stored).
@@ -264,9 +277,19 @@ impl<const R: usize> StdRibbon<R> {
     pub fn from_keys_pleated(keys: &[u64]) -> Option<Self> {
         build_std128_pleated::<R>(keys, DEFAULT_WINDOW_SHIFT).map(|soln| Self { soln })
     }
+    /// Build from arbitrary hashable items (each hashed via [`crate::hash_key`]), pleated.
+    pub fn from_hashable<K: core::hash::Hash>(items: &[K]) -> Option<Self> {
+        let hashes: Vec<u64> = items.iter().map(crate::hash_key).collect();
+        Self::from_keys_pleated(&hashes)
+    }
     #[inline]
     pub fn contains(&self, key: u64) -> bool {
         self.soln.contains(key)
+    }
+    /// Query an arbitrary hashable item (hashed the same way as [`StdRibbon::from_hashable`]).
+    #[inline]
+    pub fn contains_hashable<K: core::hash::Hash>(&self, item: &K) -> bool {
+        self.soln.contains(crate::hash_key(item))
     }
     pub fn size_bytes(&self) -> usize {
         self.soln.segments().len() * 16
@@ -315,5 +338,28 @@ mod std128_tests {
         for x in [1u64, 7, 999, u64::MAX] {
             assert_eq!(f.contains(x), g.contains(x));
         }
+    }
+}
+
+#[cfg(test)]
+mod hashable_tests {
+    use super::*;
+
+    #[test]
+    fn hashable_string_and_struct_keys() {
+        let words: Vec<String> = (0..50_000).map(|i| format!("item-{i}")).collect();
+        let f = RibbonFilter::from_hashable(&words);
+        assert!(words.iter().all(|w| f.contains_hashable(w)), "false negative on strings");
+        // Absent items: overwhelmingly rejected.
+        let absent = (0..50_000).filter(|i| {
+            let w = format!("absent-{i}");
+            f.contains_hashable(&w)
+        }).count();
+        assert!((absent as f64 / 50_000.0) < 0.02, "FPR too high on strings");
+
+        // Tuple keys through StdRibbon.
+        let pairs: Vec<(u32, u32)> = (0..20_000u32).map(|i| (i, i.wrapping_mul(7))).collect();
+        let g = StdRibbon::<8>::from_hashable(&pairs).unwrap();
+        assert!(pairs.iter().all(|p| g.contains_hashable(p)));
     }
 }

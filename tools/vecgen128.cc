@@ -51,19 +51,13 @@ static inline uint64_t hi64(ribbon::Unsigned128 v) { return ribbon::Upper64of128
 static inline uint64_t lo64(ribbon::Unsigned128 v) { return ribbon::Lower64of128(v); }
 
 static const size_t BUILD_N = 10000;
-static constexpr uint32_t R = 7;
 
-int main() {
-  using TS = Std128TS<R>;
-  using Banding = ribbon::StandardBanding<TS>;
+// r-independent per-key vectors at ordinal seed 0 (uses r=7 slot count for starts).
+static void emit_hash_vectors() {
+  using TS = Std128TS<7>;
   using InterleavedSoln = ribbon::SerializableInterleavedSolution<TS>;
-
-  printf("{\n");
-  printf("  \"config\": {\"w\":128, \"r\":%u, \"homogeneous\":false, \"raw_seed\":0},\n", R);
-
-  // Per-key vectors at ordinal seed 0 (raw_seed 0).
   ribbon::StandardHasher<TS> h0;
-  const double overhead = 1.0 + (4.0 + R * 0.25) / (8.0 * 16.0);  // sizeof(CoeffRow)=16
+  const double overhead = 1.0 + (4.0 + 7.0 * 0.25) / (8.0 * 16.0);
   const size_t num_slots = InterleavedSoln::RoundUpNumSlots((size_t)(overhead * BUILD_N));
   const size_t num_starts = num_slots - 128 + 1;
   printf("  \"num_starts_seed0\": %zu,\n", num_starts);
@@ -79,8 +73,15 @@ int main() {
            (unsigned)h0.GetResultRowFromHash(hh), i + 1 < hv.size() ? "," : "");
   }
   printf("  ],\n");
+}
 
-  // Build with the reference seed-finding loop.
+template <uint32_t R>
+static void emit_for_r(bool last) {
+  using TS = Std128TS<R>;
+  using Banding = ribbon::StandardBanding<TS>;
+  using InterleavedSoln = ribbon::SerializableInterleavedSolution<TS>;
+  const double overhead = 1.0 + (4.0 + R * 0.25) / (8.0 * 16.0);
+  const size_t num_slots = InterleavedSoln::RoundUpNumSlots((size_t)(overhead * BUILD_N));
   Banding banding;
   auto bk = keys(BUILD_N, UINT64_C(0xA11CE));
   bool ok = banding.ResetAndFindSeedToSolve(num_slots, bk.begin(), bk.end(), 0U, 63U);
@@ -91,18 +92,15 @@ int main() {
   soln.BackSubstFrom(banding);
   uint64_t fnv = UINT64_C(0xcbf29ce484222325);
   for (size_t i = 0; i < bytes; i++) fnv = (fnv ^ (uint8_t)ptr[i]) * UINT64_C(0x100000001b3);
-
-  // Query hasher must use the chosen seed.
   ribbon::StandardHasher<TS> hq;
   hq.SetOrdinalSeed(chosen);
-
-  printf("  \"build\": {\"n\": %zu, \"num_slots\": %zu, \"bytes\": %zu, \"banding_ok\": %s, "
+  printf("    \"%u\": {\"num_slots\": %zu, \"bytes\": %zu, \"banding_ok\": %s, "
          "\"chosen_ordinal_seed\": %u, \"soln_fnv\": \"%016llx\",\n",
-         BUILD_N, num_slots, bytes, ok ? "true" : "false", chosen, (unsigned long long)fnv);
-  printf("    \"present\": [");
+         R, num_slots, bytes, ok ? "true" : "false", chosen, (unsigned long long)fnv);
+  printf("      \"present\": [");
   for (size_t i = 0; i < 200; i++)
     printf("%d%s", soln.FilterQuery(bk[i * 37 % BUILD_N], hq) ? 1 : 0, i + 1 < 200 ? "," : "");
-  printf("],\n    \"absent\": [");
+  printf("],\n      \"absent\": [");
   auto ak = keys(200, UINT64_C(0xD15EA5E));
   size_t fp = 0;
   for (size_t i = 0; i < 200; i++) {
@@ -110,6 +108,19 @@ int main() {
     fp += r;
     printf("%d%s", r, i + 1 < 200 ? "," : "");
   }
-  printf("],\n    \"absent_false_positives\": %zu\n  }\n}\n", fp);
+  printf("],\n      \"absent_false_positives\": %zu\n    }%s\n", fp, last ? "" : ",");
+}
+
+int main() {
+  printf("{\n");
+  printf("  \"config\": {\"w\":128, \"homogeneous\":false, \"raw_seed\":0},\n");
+  emit_hash_vectors();
+  printf("  \"build_n\": %zu,\n", BUILD_N);
+  printf("  \"by_r\": {\n");
+  emit_for_r<5>(false);
+  emit_for_r<7>(false);
+  emit_for_r<8>(false);
+  emit_for_r<10>(true);
+  printf("  }\n}\n");
   return 0;
 }
