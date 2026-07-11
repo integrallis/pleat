@@ -33,6 +33,8 @@ pub enum DecodeError {
     WrongFamily,
     /// Result width `r` in the buffer does not match the target `R`.
     WrongResultWidth,
+    /// Reserved header bytes are non-zero and therefore invalid for this format version.
+    NonZeroReserved,
     /// A geometry field is inconsistent (bad `num_starts`, slot count, or segment count).
     BadGeometry,
     /// Declared segment count does not match the payload length.
@@ -50,6 +52,7 @@ impl core::fmt::Display for DecodeError {
             DecodeError::BadMagic => "not a pleat filter buffer (bad magic)",
             DecodeError::WrongFamily => "filter family does not match",
             DecodeError::WrongResultWidth => "result width does not match",
+            DecodeError::NonZeroReserved => "reserved header bytes must be zero",
             DecodeError::BadGeometry => "inconsistent filter geometry",
             DecodeError::LengthMismatch => "payload length does not match declared segments",
             DecodeError::BadSeed => "seed out of range",
@@ -140,6 +143,9 @@ pub(crate) fn decode(
     if r != expected_r {
         return Err(DecodeError::WrongResultWidth);
     }
+    if bytes[6..8] != [0, 0] {
+        return Err(DecodeError::NonZeroReserved);
+    }
     let seed = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
     let num_starts = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
     let segment_count = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
@@ -153,6 +159,9 @@ pub(crate) fn decode(
     if num_starts == 0 || num_slots % w != 0 || num_slots < 2 * w {
         return Err(DecodeError::BadGeometry);
     }
+    // Every decoded index is represented as usize. Reject geometries that cannot exist on the
+    // current target before any narrowing conversion (especially important on 32-bit targets).
+    usize::try_from(num_slots).map_err(|_| DecodeError::BadGeometry)?;
     let num_blocks = num_slots / w;
     let expect_segments = num_blocks
         .checked_mul(r as u64)
@@ -160,10 +169,15 @@ pub(crate) fn decode(
     if segment_count != expect_segments {
         return Err(DecodeError::BadGeometry);
     }
-    let payload_len = (segment_count as usize)
+    let segment_count = usize::try_from(segment_count).map_err(|_| DecodeError::BadGeometry)?;
+    let payload_len = segment_count
         .checked_mul(elem_size)
         .ok_or(DecodeError::BadGeometry)?;
-    if HEADER_LEN + payload_len + CHECKSUM_LEN != bytes.len() {
+    let total_len = HEADER_LEN
+        .checked_add(payload_len)
+        .and_then(|n| n.checked_add(CHECKSUM_LEN))
+        .ok_or(DecodeError::BadGeometry)?;
+    if total_len != bytes.len() {
         return Err(DecodeError::LengthMismatch);
     }
     Ok((
@@ -196,6 +210,16 @@ mod tests {
             decode(&good, FAMILY_HOMOG, 8, 8, 64).unwrap_err(),
             DecodeError::WrongResultWidth
         );
+        // Reserved bytes are part of v1's contract and must remain zero.
+        let mut reserved = good.clone();
+        reserved[6] = 1;
+        let checksum_at = reserved.len() - CHECKSUM_LEN;
+        let checksum = fnv1a(&reserved[..checksum_at]);
+        reserved[checksum_at..].copy_from_slice(&checksum.to_le_bytes());
+        assert_eq!(
+            decode(&reserved, FAMILY_HOMOG, 7, 8, 64).unwrap_err(),
+            DecodeError::NonZeroReserved
+        );
         // Corrupt a payload byte -> checksum fails.
         let mut bad = good.clone();
         bad[HEADER_LEN] ^= 0xFF;
@@ -217,6 +241,22 @@ mod tests {
         // segment_count says 8 but num_starts implies 7 -> BadGeometry (caught before length).
         let mut buf = write_header(FAMILY_HOMOG, 7, 0, 129, 8);
         buf.extend_from_slice(&[0u8; 8 * 8]);
+        let b = finish(buf);
+        assert_eq!(
+            decode(&b, FAMILY_HOMOG, 7, 8, 64).unwrap_err(),
+            DecodeError::BadGeometry
+        );
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn rejects_geometry_that_cannot_fit_usize() {
+        // Seven real segments plus seven complete 2^32 wraps used to truncate to seven when
+        // cast to usize, allowing a tiny payload to describe a huge, unqueryable filter.
+        let num_starts = (1u64 << 38) + 1;
+        let segment_count = 7 * ((1u64 << 32) + 1);
+        let mut buf = write_header(FAMILY_HOMOG, 7, 0, num_starts, segment_count);
+        buf.extend_from_slice(&[0u8; 7 * 8]);
         let b = finish(buf);
         assert_eq!(
             decode(&b, FAMILY_HOMOG, 7, 8, 64).unwrap_err(),
