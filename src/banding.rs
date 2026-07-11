@@ -70,6 +70,15 @@ impl Banding {
         }
     }
 
+    /// Back-substitute and wrap the segments into a queryable [`Solution`].
+    pub fn solve(&self) -> Solution {
+        Solution {
+            segments: self.back_substitute(),
+            num_starts: self.num_starts,
+            raw_seed: self.raw_seed,
+        }
+    }
+
     /// Interleaved back-substitution into `num_segments` little-endian u64 segments
     /// (InterleavedBackSubst + BackSubstBlock, homogeneous: result rows 0).
     pub fn back_substitute(&self) -> Vec<u64> {
@@ -102,6 +111,46 @@ impl Banding {
             data[segment_num..segment_num + R].copy_from_slice(&state);
         }
         data
+    }
+}
+
+/// The solved, queryable interleaved solution for a homogeneous ribbon filter (w=64, r=7).
+pub struct Solution {
+    segments: Vec<u64>,
+    num_starts: u64,
+    raw_seed: u64,
+}
+
+impl Solution {
+    pub fn segments(&self) -> &[u64] {
+        &self.segments
+    }
+
+    /// Membership query (InterleavedPrepareQuery + InterleavedFilterQuery, r=7 fixed columns,
+    /// upper_start_block=0). Homogeneous: the expected result row is 0, so a key is present iff
+    /// all `r` column parities are zero. False positives occur at rate ~2^-r.
+    pub fn contains(&self, key: u64) -> bool {
+        let h = ribbon_hash(key, self.raw_seed);
+        let start_slot = start(h, self.num_starts) as usize;
+        let start_block = start_slot / W;
+        let segment_num = start_block * R; // upper_start_block == 0
+        let start_bit = start_slot % W;
+
+        let cr = coeff_row(h);
+        let cr_left = cr << start_bit;
+        // Avoid the undefined shift-by-64: (W - start_bit) % W.
+        let cr_right = cr >> ((W - start_bit) % W);
+        let maybe = if start_bit != 0 { R } else { 0 };
+
+        for i in 0..R {
+            let soln = (self.segments[segment_num + i] & cr_left)
+                | (self.segments[segment_num + maybe + i] & cr_right);
+            // expected bit is 0 for homogeneous; present requires even parity in every column.
+            if (soln.count_ones() & 1) != 0 {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -177,6 +226,48 @@ mod tests {
             expect_fnv,
             "solution fingerprint diverges from the reference kernel"
         );
+    }
+
+    /// Extract the JSON int array `"name": [ ... ]` as bits.
+    fn vec_array(json: &str, name: &str) -> Vec<u8> {
+        let pat = format!("\"{name}\":");
+        let i = json.find(&pat).unwrap() + pat.len();
+        let rest = &json[i..];
+        let lb = rest.find('[').unwrap();
+        let rb = rest.find(']').unwrap();
+        rest[lb + 1..rb]
+            .split(',')
+            .filter_map(|t| t.trim().parse::<u8>().ok())
+            .collect()
+    }
+
+    #[test]
+    fn query_outcomes_match_reference() {
+        let j = load();
+        let build = &j[j.find("\"build\"").unwrap()..];
+        let n = vec_field(build, "n") as usize;
+        let num_slots = vec_field(build, "num_slots") as usize;
+
+        let bk = keys(n, 0xA11CE);
+        let mut b = Banding::new(num_slots, 0);
+        b.add_all(&bk);
+        let soln = b.solve();
+
+        // Present set: the reference queried bk[i*37 % n] for i in 0..200 (see vecgen.cc).
+        let present_ref = vec_array(&j, "present");
+        for (i, &want) in present_ref.iter().enumerate() {
+            let got = soln.contains(bk[i * 37 % n]) as u8;
+            assert_eq!(got, want, "present query {i} disagrees with reference");
+        }
+        // Absent set: keys(200, 0xD15EA5E) each xored with 0x5555...
+        let absent_ref = vec_array(&j, "absent");
+        let ak = keys(200, 0xD15EA5E);
+        for (i, &want) in absent_ref.iter().enumerate() {
+            let got = soln.contains(ak[i] ^ 0x5555_5555_5555_5555) as u8;
+            assert_eq!(got, want, "absent query {i} disagrees with reference");
+        }
+        // Every inserted key must be present (zero false negatives).
+        assert!(bk.iter().all(|&k| soln.contains(k)));
     }
 
     #[test]
