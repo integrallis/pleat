@@ -8,7 +8,7 @@ arrival order at scale. An Integrallis project; companion to the paper *"Ribbon 
 Pleated Construction at Bloom Speed."*
 
 A ribbon filter answers approximate set membership — "is this key possibly in the set?" — in
-about 9.6 bits per key at a ~0.8% false-positive rate, well under a Bloom filter's memory for
+about 7.6 bits per key at a ~0.8% false-positive rate, well under a Bloom filter's memory for
 the same accuracy. The cost has always been construction: ribbon filters are built by solving a
 banded linear system, and doing that in arrival order makes every key a random jump through a
 table far larger than cache. Pleating groups keys into cache-sized windows with a single
@@ -33,6 +33,14 @@ Construction variants, all producing the **bit-identical** filter (banding is or
 RibbonFilter::from_keys(&keys);              // arrival order (reference default)
 RibbonFilter::from_keys_pleated(&keys);      // pleated: ~2x faster at scale
 RibbonFilter::from_keys_parallel(&keys, 8);  // slot-range parallel (feature "parallel")
+```
+
+Tune the false-positive rate with the result-width parameter `R` (~2^-R):
+
+```rust
+use pleat::filter::Ribbon;
+let low_fpr = Ribbon::<10>::from_keys_pleated(&keys);   // ~0.1% FPR, ~10.9 bits/key
+// RibbonFilter is the alias Ribbon<7> (~0.8% FPR, ~7.6 bits/key)
 ```
 
 ## Measured construction cost
@@ -67,8 +75,10 @@ data, not zero — the trick that preserves the false-positive rate).
 
 ## Scope
 
-This release implements **homogeneous ribbon** at w=64, r=7 (~9.6 bits/key, ~0.8% FPR), the
-variant used as the reference benchmark and the one pleating targets. Keys are 64-bit; hash
+This release implements **homogeneous ribbon** at w=64 with a tunable result width R (columns):
+the false-positive rate is ~2^-R and the size is ~1.09·R bits per key, so R=7 gives ~0.8% FPR
+at ~7.6 bits/key — the variant used as the reference benchmark — and R=10 gives ~0.1% at
+~10.9 bits/key. Gated against reference vectors for R in {5, 7, 8, 10}. Keys are 64-bit; hash
 your keys to `u64` first. Standard ribbon (w=128) is planned.
 
 ## Reproduce

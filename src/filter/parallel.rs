@@ -7,7 +7,7 @@
 //! same fingerprint gate. No `unsafe`: the matrix is split into non-overlapping mutable slices
 //! with `split_at_mut`.
 
-use crate::banding::{Banding, Solution, R, W};
+use crate::banding::{Banding, Solution, W};
 use crate::hash::{coeff_row, ribbon_hash, start};
 use std::thread;
 
@@ -15,13 +15,13 @@ use std::thread;
 /// boundary is deferred, guaranteeing non-deferred reductions never cross into the next range.
 const G: usize = 1 << 14;
 
-pub fn from_keys_parallel_seeded(
+pub fn from_keys_parallel_seeded<const R: usize>(
     keys: &[u64],
     seed: u64,
     window_shift: u32,
     threads: usize,
-) -> Solution {
-    let mut band = Banding::new(crate::filter::num_slots_for(keys.len()), seed);
+) -> Solution<R> {
+    let mut band = Banding::<R>::new(crate::filter::num_slots_for(keys.len(), R), seed);
     let num_slots = band.num_slots();
     let num_starts = (num_slots - W + 1) as u64;
     let threads = threads.max(1).min(num_slots / W); // at least one window per thread
@@ -105,7 +105,7 @@ fn band_slice(slice: &mut [u64], base: usize, num_starts: u64, seed: u64, keys: 
             cr >>= tz;
         }
     }
-    let _ = (R, len);
+    let _ = len;
 }
 
 #[cfg(test)]
@@ -129,7 +129,7 @@ mod tests {
         let k = keys(300_000, 0xA11CE);
         let seq = RibbonFilter::from_keys(&k);
         for t in [2usize, 4, 8] {
-            let par = from_keys_parallel_seeded(&k, 0, 16, t);
+            let par = from_keys_parallel_seeded::<7>(&k, 0, 16, t);
             assert_eq!(
                 solution_fnv(seq_segments(&seq)),
                 solution_fnv(par.segments()),

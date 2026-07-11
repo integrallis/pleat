@@ -1,8 +1,9 @@
 //! Public ribbon filter API with pleated construction.
 //!
-//! [`RibbonFilter`] is a homogeneous ribbon filter (w=64, r=7, ~0.8% false-positive rate at
-//! ~9.6 bits/key). It offers three construction orders that all produce the **same filter, bit
-//! for bit** (the ribbon banding solution is invariant to insertion order):
+//! [`RibbonFilter`] is a homogeneous ribbon filter (w=64, default R=7 result bits, ~0.8%
+//! false-positive rate at ~7.6 bits/key; tune R via [`Ribbon`] for other rates). It offers
+//! three construction orders that all produce the **same filter, bit for bit** (the ribbon
+//! banding solution is invariant to insertion order):
 //! - [`RibbonFilter::from_keys`] — arrival order (the reference default).
 //! - [`RibbonFilter::from_keys_pleated`] — one counting pass groups keys into cache-sized
 //!   windows before banding; ~2x faster to build at scale for the same output.
@@ -13,15 +14,18 @@ use crate::banding::{Banding, Solution, W};
 use crate::hash::{ribbon_hash, start};
 use crate::PleatPlan;
 
-/// Space overhead factor for w=64, r=7 (filterapi.h `GetBestOverheadFactor`).
-const OVERHEAD: f64 = 1.0 + (4.0 + 7.0 * 0.25) / (8.0 * 8.0);
 /// Default pleating window: 2^16 slots (~768 KiB of banding state, under half an L2).
 pub const DEFAULT_WINDOW_SHIFT: u32 = 16;
 
-/// Number of banding slots for `n` keys, rounded up to a multiple of 64 (never fewer than 128
-/// for the non-smash configuration). Mirrors `RoundUpNumSlots(OVERHEAD * n)`.
-pub fn num_slots_for(n: usize) -> usize {
-    let raw = (OVERHEAD * n as f64) as usize;
+/// Space overhead factor for w=64 with `r` result bits (filterapi.h `GetBestOverheadFactor`).
+fn overhead(r: usize) -> f64 {
+    1.0 + (4.0 + r as f64 * 0.25) / (8.0 * 8.0)
+}
+
+/// Number of banding slots for `n` keys at result width `r`, rounded up to a multiple of 64
+/// (never fewer than 128 for the non-smash configuration). Mirrors `RoundUpNumSlots`.
+pub fn num_slots_for(n: usize, r: usize) -> usize {
+    let raw = (overhead(r) * n as f64) as usize;
     let mut s = raw.div_ceil(W) * W;
     if s == W {
         s += W;
@@ -29,19 +33,24 @@ pub fn num_slots_for(n: usize) -> usize {
     s.max(2 * W)
 }
 
-/// A homogeneous ribbon filter over 64-bit keys.
-pub struct RibbonFilter {
-    soln: Solution,
+/// A homogeneous ribbon filter over 64-bit keys with `R` result bits (false-positive rate
+/// ~2^-R). Use the [`RibbonFilter`] alias for the default (R=7, ~0.8% FPR), or pick another
+/// width, e.g. `Ribbon::<10>::from_keys(&keys)` for ~0.1%.
+pub struct Ribbon<const R: usize> {
+    soln: Solution<R>,
 }
 
-impl RibbonFilter {
+/// Homogeneous ribbon filter at the default R=7 (~0.8% false-positive rate, ~7.6 bits/key).
+pub type RibbonFilter = Ribbon<7>;
+
+impl<const R: usize> Ribbon<R> {
     /// Build from keys in arrival order (seed 0).
     pub fn from_keys(keys: &[u64]) -> Self {
         Self::from_keys_seeded(keys, 0)
     }
 
     pub fn from_keys_seeded(keys: &[u64], seed: u64) -> Self {
-        let mut b = Banding::new(num_slots_for(keys.len()), seed);
+        let mut b = Banding::<R>::new(num_slots_for(keys.len(), R), seed);
         b.add_all(keys);
         Self { soln: b.solve() }
     }
@@ -53,11 +62,11 @@ impl RibbonFilter {
     }
 
     pub fn from_keys_pleated_seeded(keys: &[u64], seed: u64, window_shift: u32) -> Self {
-        let num_slots = num_slots_for(keys.len());
+        let num_slots = num_slots_for(keys.len(), R);
         let num_starts = (num_slots - W + 1) as u64;
         let plan = PleatPlan::new(num_starts, window_shift);
         let (ordered, _counts) = plan.pleat(keys, |k| start(ribbon_hash(k, seed), num_starts));
-        let mut b = Banding::new(num_slots, seed);
+        let mut b = Banding::<R>::new(num_slots, seed);
         b.add_all(&ordered);
         Self { soln: b.solve() }
     }
@@ -119,7 +128,7 @@ mod parallel;
 pub use parallel::from_keys_parallel_seeded;
 
 #[cfg(feature = "parallel")]
-impl RibbonFilter {
+impl<const R: usize> Ribbon<R> {
     /// Build with slot-range parallel banding (boundary keys deferred to a sequential tail).
     /// Produces the identical filter to [`RibbonFilter::from_keys`]. Requires the `parallel` feature.
     pub fn from_keys_parallel(keys: &[u64], threads: usize) -> Self {
@@ -133,7 +142,7 @@ impl RibbonFilter {
         threads: usize,
     ) -> Self {
         Self {
-            soln: from_keys_parallel_seeded(keys, seed, window_shift, threads),
+            soln: from_keys_parallel_seeded::<R>(keys, seed, window_shift, threads),
         }
     }
 }
@@ -196,6 +205,24 @@ mod prod_tests {
         assert!(!f.contains(12345) || f.contains(12345)); // no member; just must not panic
         let f2 = RibbonFilter::from_keys_pleated(&[7, 42, 1000]);
         assert!(f2.contains(7) && f2.contains(42) && f2.contains(1000));
+    }
+
+    #[test]
+    fn tunable_fpr_scales_with_r() {
+        use crate::filter::Ribbon;
+        let k: Vec<u64> = (0..200_000u64).map(|i| i.wrapping_mul(0x9e3779b97f4a7c15)).collect();
+        let absent: Vec<u64> =
+            (0..200_000u64).map(|i| i.wrapping_mul(0x9e3779b97f4a7c15) ^ 0x1).collect();
+        let fpr = |present: &dyn Fn(u64) -> bool| -> f64 {
+            absent.iter().filter(|&&x| present(x)).count() as f64 / absent.len() as f64
+        };
+        let f7 = Ribbon::<7>::from_keys_pleated(&k);
+        let f10 = Ribbon::<10>::from_keys_pleated(&k);
+        assert!(k.iter().all(|&x| f7.contains(x)) && k.iter().all(|&x| f10.contains(x)));
+        let (e7, e10) = (fpr(&|x| f7.contains(x)), fpr(&|x| f10.contains(x)));
+        // Lower FPR (higher r) costs more space; ~2^-r each.
+        assert!(e10 < e7, "r=10 FPR {e10} should be below r=7 {e7}");
+        assert!(f10.bits_per_key(k.len()) > f7.bits_per_key(k.len()));
     }
 
     #[test]

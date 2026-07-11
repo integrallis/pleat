@@ -15,16 +15,16 @@
 use crate::hash::{coeff_row, ribbon_hash, start};
 
 pub const W: usize = 64;
-pub const R: usize = 7;
 
-/// The banding matrix for homogeneous ribbon: one coefficient row per slot (result rows are 0).
-pub struct Banding {
+/// The banding matrix for homogeneous ribbon over `R` result bits (columns). Result rows are
+/// zero for members; `R` sets the false-positive rate at ~2^-R.
+pub struct Banding<const R: usize> {
     coeff_rows: Vec<u64>,
     num_starts: u64,
     raw_seed: u64,
 }
 
-impl Banding {
+impl<const R: usize> Banding<R> {
     /// `num_slots` must be a multiple of 64.
     pub fn new(num_slots: usize, raw_seed: u64) -> Self {
         assert_eq!(num_slots % W, 0, "num_slots must be a multiple of 64");
@@ -77,7 +77,7 @@ impl Banding {
     }
 
     /// Back-substitute and wrap the segments into a queryable [`Solution`].
-    pub fn solve(&self) -> Solution {
+    pub fn solve(&self) -> Solution<R> {
         Solution {
             segments: self.back_substitute(),
             num_starts: self.num_starts,
@@ -120,14 +120,14 @@ impl Banding {
     }
 }
 
-/// The solved, queryable interleaved solution for a homogeneous ribbon filter (w=64, r=7).
-pub struct Solution {
+/// The solved, queryable interleaved solution for a homogeneous ribbon filter (w=64, R columns).
+pub struct Solution<const R: usize> {
     segments: Vec<u64>,
     num_starts: u64,
     raw_seed: u64,
 }
 
-impl Solution {
+impl<const R: usize> Solution<R> {
     pub fn segments(&self) -> &[u64] {
         &self.segments
     }
@@ -137,7 +137,7 @@ impl Solution {
         (self.num_starts, self.raw_seed, &self.segments)
     }
 
-    /// Reconstruct from serialized components (used by `RibbonFilter::from_bytes`).
+    /// Reconstruct from serialized components (used by `Ribbon::from_bytes`).
     pub fn from_parts(num_starts: u64, raw_seed: u64, segments: Vec<u64>) -> Self {
         Self { segments, num_starts, raw_seed }
     }
@@ -225,23 +225,36 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn build_fingerprint_matches_reference() {
-        let j = load();
-        // Scope into the "build" object so field names don't collide with hash_vectors.
-        let build = &j[j.find("\"build\"").unwrap()..];
-        let n = vec_field(build, "n") as usize;
-        let num_slots = vec_field(build, "num_slots") as usize;
-        let expect_fnv = vec_field(build, "soln_fnv");
+    /// Slice the JSON object for result-width `r` under `"by_r"`.
+    fn by_r<'a>(json: &'a str, r: usize) -> &'a str {
+        let key = format!("\"{r}\":");
+        let i = json.find("\"by_r\"").unwrap();
+        let j = json[i..].find(&key).unwrap() + i + key.len();
+        &json[j..]
+    }
 
-        let mut b = Banding::new(num_slots, 0);
+    /// Run the fingerprint gate for one const-generic result width R against its vector.
+    fn gate_build<const R: usize>(j: &str, r: usize) {
+        let obj = by_r(j, r);
+        let n = vec_field(&j[j.find("\"build_n\"").unwrap()..], "build_n") as usize;
+        let num_slots = vec_field(obj, "num_slots") as usize;
+        let expect = vec_field(obj, "soln_fnv");
+        let mut b = Banding::<R>::new(num_slots, 0);
         b.add_all(&keys(n, 0xA11CE));
-        let soln = b.back_substitute();
         assert_eq!(
-            solution_fnv(&soln),
-            expect_fnv,
-            "solution fingerprint diverges from the reference kernel"
+            solution_fnv(&b.back_substitute()),
+            expect,
+            "solution fingerprint diverges from reference at r={r}"
         );
+    }
+
+    #[test]
+    fn build_fingerprint_matches_reference_all_r() {
+        let j = load();
+        gate_build::<5>(&j, 5);
+        gate_build::<7>(&j, 7);
+        gate_build::<8>(&j, 8);
+        gate_build::<10>(&j, 10);
     }
 
     /// Extract the JSON int array `"name": [ ... ]` as bits.
@@ -257,39 +270,42 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn query_outcomes_match_reference() {
-        let j = load();
-        let build = &j[j.find("\"build\"").unwrap()..];
-        let n = vec_field(build, "n") as usize;
-        let num_slots = vec_field(build, "num_slots") as usize;
-
+    fn gate_query<const R: usize>(j: &str, r: usize) {
+        let obj = by_r(j, r);
+        let n = vec_field(&j[j.find("\"build_n\"").unwrap()..], "build_n") as usize;
+        let num_slots = vec_field(obj, "num_slots") as usize;
         let bk = keys(n, 0xA11CE);
-        let mut b = Banding::new(num_slots, 0);
+        let mut b = Banding::<R>::new(num_slots, 0);
         b.add_all(&bk);
         let soln = b.solve();
 
-        // Present set: the reference queried bk[i*37 % n] for i in 0..200 (see vecgen.cc).
-        let present_ref = vec_array(&j, "present");
-        for (i, &want) in present_ref.iter().enumerate() {
-            let got = soln.contains(bk[i * 37 % n]) as u8;
-            assert_eq!(got, want, "present query {i} disagrees with reference");
+        for (i, &want) in vec_array(obj, "present").iter().enumerate() {
+            assert_eq!(soln.contains(bk[i * 37 % n]) as u8, want, "present r={r} i={i}");
         }
-        // Absent set: keys(200, 0xD15EA5E) each xored with 0x5555...
-        let absent_ref = vec_array(&j, "absent");
         let ak = keys(200, 0xD15EA5E);
-        for (i, &want) in absent_ref.iter().enumerate() {
-            let got = soln.contains(ak[i] ^ 0x5555_5555_5555_5555) as u8;
-            assert_eq!(got, want, "absent query {i} disagrees with reference");
+        for (i, &want) in vec_array(obj, "absent").iter().enumerate() {
+            assert_eq!(
+                soln.contains(ak[i] ^ 0x5555_5555_5555_5555) as u8,
+                want,
+                "absent r={r} i={i}"
+            );
         }
-        // Every inserted key must be present (zero false negatives).
-        assert!(bk.iter().all(|&k| soln.contains(k)));
+        assert!(bk.iter().all(|&k| soln.contains(k)), "false negative r={r}");
+    }
+
+    #[test]
+    fn query_outcomes_match_reference_all_r() {
+        let j = load();
+        gate_query::<5>(&j, 5);
+        gate_query::<7>(&j, 7);
+        gate_query::<8>(&j, 8);
+        gate_query::<10>(&j, 10);
     }
 
     #[test]
     fn no_reduction_leaves_low_bit_set() {
         // Guard on the banding invariant: cr always carries a set low bit at each step.
-        let mut b = Banding::new(64 * 32, 0);
+        let mut b = Banding::<7>::new(64 * 32, 0);
         assert!(b.add(12345));
         assert!(b.coeff_rows.iter().filter(|&&c| c != 0).all(|&c| c & 1 == 1));
     }
