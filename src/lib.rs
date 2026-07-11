@@ -7,6 +7,7 @@
 
 pub mod hash;
 pub mod banding;
+pub mod filter;
 /// A pleating plan: how a key stream is folded into table-window order.
 ///
 /// `shift` selects the window size in slots (`1 << shift`); the paper's registered

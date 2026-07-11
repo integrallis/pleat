@@ -39,6 +39,12 @@ impl Banding {
         self.coeff_rows.len()
     }
 
+    /// Mutable access to the coefficient-row matrix, for the parallel builder to split into
+    /// disjoint slot ranges. The band's `num_starts`/`raw_seed` are unchanged.
+    pub fn coeff_rows_mut(&mut self) -> &mut [u64] {
+        &mut self.coeff_rows
+    }
+
     /// Insert one key by Gaussian row-reduction into the band (BandingAdd, homogeneous:
     /// result row is 0, kFirstCoeffAlwaysOne so `cr` always enters with its low bit set).
     /// Returns false only on an inconsistent linear dependence — impossible for homogeneous
