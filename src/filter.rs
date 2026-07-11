@@ -17,6 +17,32 @@ use crate::PleatPlan;
 /// Default pleating window: 2^16 slots (~768 KiB of banding state, under half an L2).
 pub const DEFAULT_WINDOW_SHIFT: u32 = 16;
 
+/// Validate a configurable pleating shift and return its window size.
+pub(crate) fn window_size(window_shift: u32) -> usize {
+    assert!(
+        window_shift < usize::BITS,
+        "pleating window shift must be smaller than the target pointer width"
+    );
+    1usize << window_shift
+}
+
+/// Error returned when standard ribbon cannot find a solving seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildError {
+    /// None of the 64 standard ordinal seeds solved the banding system.
+    NoSolvingSeed,
+}
+
+impl core::fmt::Display for BuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoSolvingSeed => f.write_str("no standard ribbon seed solved the key set"),
+        }
+    }
+}
+
+impl std::error::Error for BuildError {}
+
 /// Space overhead factor for w=64 with `r` result bits (filterapi.h `GetBestOverheadFactor`).
 fn overhead(r: usize) -> f64 {
     1.0 + (4.0 + r as f64 * 0.25) / (8.0 * 8.0)
@@ -76,8 +102,13 @@ impl<const R: usize> Ribbon<R> {
 
     /// Pleated build with explicit seed and window shift (`1 << window_shift` slots per
     /// window; the default is [`DEFAULT_WINDOW_SHIFT`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `window_shift` is not smaller than both 64 and the target pointer width.
     pub fn from_keys_pleated_seeded(keys: &[u64], seed: u64, window_shift: u32) -> Self {
         Self::check_width();
+        let _ = window_size(window_shift);
         let num_slots = num_slots_for(keys.len(), R);
         let num_starts = (num_slots - W + 1) as u64;
         let plan = PleatPlan::new(num_starts, window_shift);
@@ -123,6 +154,9 @@ impl<const R: usize> Ribbon<R> {
 
     /// Bits per key for `n` inserted keys (diagnostic).
     pub fn bits_per_key(&self, n: usize) -> f64 {
+        if n == 0 {
+            return f64::INFINITY;
+        }
         self.size_bytes() as f64 * 8.0 / n as f64
     }
 
@@ -182,12 +216,18 @@ impl<const R: usize> Ribbon<R> {
     }
 
     /// Parallel build with explicit seed, window shift, and thread count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `window_shift` is not smaller than both 64 and the target pointer width.
     pub fn from_keys_parallel_seeded(
         keys: &[u64],
         seed: u64,
         window_shift: u32,
         threads: usize,
     ) -> Self {
+        Self::check_width();
+        let _ = window_size(window_shift);
         Self {
             soln: parallel::from_keys_parallel_seeded::<R>(keys, seed, window_shift, threads),
         }
@@ -252,7 +292,8 @@ mod prod_tests {
     #[test]
     fn empty_and_tiny_inputs_do_not_panic() {
         let f = RibbonFilter::from_keys(&[]);
-        assert!(!f.contains(12345) || f.contains(12345)); // no member; just must not panic
+        let _empty_probe = f.contains(12345);
+        assert!(f.size_bytes() > 0);
         let f2 = RibbonFilter::from_keys_pleated(&[7, 42, 1000]);
         assert!(f2.contains(7) && f2.contains(42) && f2.contains(1000));
     }
@@ -305,8 +346,8 @@ use crate::banding128::{build_std128, build_std128_pleated, Solution128, W128};
 
 /// A **standard** (non-homogeneous) ribbon filter at w=128 with `R` result bits — the shape
 /// RocksDB ships. Slightly tighter space than homogeneous ribbon for the same FPR, at the cost
-/// of a construction seed-retry loop. Construction returns `None` only if no seed in 0..64
-/// solves (not observed at the standard load factor).
+/// of a construction seed-retry loop. Construction returns [`BuildError::NoSolvingSeed`] only
+/// if no seed in 0..64 solves (not observed at the standard load factor).
 pub struct StdRibbon<const R: usize> {
     soln: Solution128<R>,
 }
@@ -323,26 +364,32 @@ impl<const R: usize> core::fmt::Debug for StdRibbon<R> {
 
 impl<const R: usize> StdRibbon<R> {
     /// Build in arrival order.
-    pub fn from_keys(keys: &[u64]) -> Option<Self> {
+    pub fn from_keys(keys: &[u64]) -> Result<Self, BuildError> {
         Self::check_width();
-        build_std128::<R>(keys).map(|soln| Self { soln })
+        build_std128::<R>(keys)
+            .map(|soln| Self { soln })
+            .ok_or(BuildError::NoSolvingSeed)
     }
     /// Build with pleated construction (bit-identical to [`StdRibbon::from_keys`], faster at scale).
-    pub fn from_keys_pleated(keys: &[u64]) -> Option<Self> {
+    pub fn from_keys_pleated(keys: &[u64]) -> Result<Self, BuildError> {
         Self::check_width();
-        build_std128_pleated::<R>(keys, DEFAULT_WINDOW_SHIFT).map(|soln| Self { soln })
+        build_std128_pleated::<R>(keys, DEFAULT_WINDOW_SHIFT)
+            .map(|soln| Self { soln })
+            .ok_or(BuildError::NoSolvingSeed)
     }
     /// Build from arbitrary hashable items (each hashed via [`crate::hash_key`]), pleated.
-    pub fn from_hashable<K: core::hash::Hash>(items: &[K]) -> Option<Self> {
+    pub fn from_hashable<K: core::hash::Hash>(items: &[K]) -> Result<Self, BuildError> {
         let hashes: Vec<u64> = items.iter().map(crate::hash_key).collect();
         Self::from_keys_pleated(&hashes)
     }
     /// Build with slot-range parallel banding under the seed-retry loop (bit-identical to
     /// [`StdRibbon::from_keys`]). Requires the `parallel` feature.
     #[cfg(feature = "parallel")]
-    pub fn from_keys_parallel(keys: &[u64], threads: usize) -> Option<Self> {
+    pub fn from_keys_parallel(keys: &[u64], threads: usize) -> Result<Self, BuildError> {
+        Self::check_width();
         crate::banding128::build_std128_parallel::<R>(keys, DEFAULT_WINDOW_SHIFT, threads)
             .map(|soln| Self { soln })
+            .ok_or(BuildError::NoSolvingSeed)
     }
     /// Is `key` possibly in the set? Never a false negative; false-positive rate ~2^-R.
     #[inline]
@@ -611,6 +658,28 @@ mod soundness_tests {
             par.to_bytes(),
             "adversarial parallel not bit-identical"
         );
+    }
+}
+
+#[cfg(all(test, miri))]
+mod miri_tests {
+    use super::*;
+
+    #[test]
+    fn decode_and_batch_queries_are_memory_safe() {
+        let keys: Vec<u64> = (0..64).map(|i| i * 0x1_0001).collect();
+
+        let homogeneous = RibbonFilter::from_keys_pleated(&keys);
+        let decoded = RibbonFilter::from_bytes(&homogeneous.to_bytes()).unwrap();
+        let mut out = vec![false; keys.len()];
+        decoded.contains_batch(&keys, &mut out);
+        assert!(out.into_iter().all(core::convert::identity));
+
+        let standard = StdRibbon::<7>::from_keys_pleated(&keys).unwrap();
+        let decoded = StdRibbon::<7>::from_bytes(&standard.to_bytes()).unwrap();
+        let mut out = vec![false; keys.len()];
+        decoded.contains_batch(&keys, &mut out);
+        assert!(out.into_iter().all(core::convert::identity));
     }
 }
 

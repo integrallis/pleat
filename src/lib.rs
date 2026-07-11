@@ -11,7 +11,8 @@
 //! let keys: Vec<u64> = (0..100_000).collect();
 //! let f = RibbonFilter::from_keys_pleated(&keys);
 //! assert!(f.contains(42));            // members never missing
-//! assert!(!f.contains(999_999_999) || true); // absent keys rejected ~99.2% of the time
+//! // Absent keys are rejected with ~99.2% probability.
+//! let _probably_absent = f.contains(999_999_999);
 //! ```
 //!
 //! [`filter::RibbonFilter`] is the homogeneous w=64 filter; [`filter::StdRibbon`] is the
@@ -60,6 +61,10 @@ pub(crate) struct PleatPlan {
 
 impl PleatPlan {
     pub fn new(num_starts: u64, shift: u32) -> Self {
+        assert!(
+            shift < usize::BITS,
+            "pleating window shift must be smaller than the target pointer width"
+        );
         Self { num_starts, shift }
     }
 
@@ -73,6 +78,19 @@ impl PleatPlan {
     /// contiguous runs `out[counts[w]..counts[w+1]]`, in table order; arrival order is
     /// preserved within a window).
     pub fn pleat<F: Fn(u64) -> u64>(&self, keys: &[u64], start_of: F) -> (Vec<u64>, Vec<usize>) {
+        let mut out = vec![0u64; keys.len()];
+        let counts = self.pleat_into(keys, start_of, &mut out);
+        (out, counts)
+    }
+
+    /// Fold into caller-owned storage, allowing seed-retry builders to reuse the key buffer.
+    pub fn pleat_into<F: Fn(u64) -> u64>(
+        &self,
+        keys: &[u64],
+        start_of: F,
+        out: &mut [u64],
+    ) -> Vec<usize> {
+        assert_eq!(keys.len(), out.len(), "pleat output length must match keys");
         let nw = self.num_windows();
         let mut counts = vec![0usize; nw + 1];
         for &k in keys {
@@ -81,14 +99,13 @@ impl PleatPlan {
         for w in 1..=nw {
             counts[w] += counts[w - 1];
         }
-        let mut out = vec![0u64; keys.len()];
         let mut cursor = counts[..nw].to_vec();
         for &k in keys {
             let w = (start_of(k) >> self.shift) as usize;
             out[cursor[w]] = k;
             cursor[w] += 1;
         }
-        (out, counts)
+        counts
     }
 }
 
