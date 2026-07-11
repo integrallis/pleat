@@ -141,12 +141,12 @@ impl<const R: usize> Solution<R> {
     }
 
     /// Borrow the serialization components: (num_starts, raw_seed, segments).
-    pub fn parts(&self) -> (u64, u64, &[u64]) {
+    pub(crate) fn parts(&self) -> (u64, u64, &[u64]) {
         (self.num_starts, self.raw_seed, &self.segments)
     }
 
     /// Reconstruct from serialized components (used by `Ribbon::from_bytes`).
-    pub fn from_parts(num_starts: u64, raw_seed: u64, segments: Vec<u64>) -> Self {
+    pub(crate) fn from_parts(num_starts: u64, raw_seed: u64, segments: Vec<u64>) -> Self {
         Self {
             segments,
             num_starts,
@@ -165,8 +165,10 @@ impl<const R: usize> Solution<R> {
                 let seg = (s / W) * R;
                 // Bounds-checked: prefetch only a pointer that is genuinely in-bounds, so no
                 // wild pointer arithmetic even on a (validated but defensively re-checked) buffer.
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", not(miri)))]
                 if let Some(p) = self.segments.get(seg) {
+                    // SAFETY: `p` came from `slice::get`, so it is a valid in-bounds address;
+                    // `_mm_prefetch` only uses it as a cache hint and does not dereference in Rust.
                     unsafe {
                         core::arch::x86_64::_mm_prefetch(
                             p as *const _ as *const i8,
@@ -174,7 +176,7 @@ impl<const R: usize> Solution<R> {
                         );
                     }
                 }
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(any(not(target_arch = "x86_64"), miri))]
                 let _ = seg;
             }
             for (k, o) in kc.iter().zip(oc.iter_mut()) {
@@ -243,41 +245,35 @@ mod tests {
             .collect()
     }
 
-    fn vec_field(json: &str, name: &str) -> u64 {
-        let pat = format!("\"{name}\":");
-        let i = json.find(&pat).unwrap() + pat.len();
-        let rest = json[i..].trim_start().trim_start_matches('"');
-        let end = rest
-            .find(|c: char| !c.is_ascii_hexdigit())
-            .unwrap_or(rest.len());
-        let tok = &rest[..end];
-        // soln_fnv is hex, others decimal; disambiguate by the field name.
+    fn vec_field(value: &serde_json::Value, name: &str) -> u64 {
         if name == "soln_fnv" {
-            u64::from_str_radix(tok, 16).unwrap()
+            let hex = value[name]
+                .as_str()
+                .expect("soln_fnv must be a hexadecimal string");
+            u64::from_str_radix(hex, 16).expect("soln_fnv must be valid hexadecimal")
         } else {
-            tok.parse().unwrap()
+            value[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("missing or non-u64 reference field {name}"))
         }
     }
 
-    fn load() -> String {
-        std::fs::read_to_string(
+    fn load() -> serde_json::Value {
+        let text = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/homog_w64_r7.json"),
         )
-        .unwrap()
+        .expect("reference vectors must be present");
+        serde_json::from_str(&text).expect("reference vectors must be valid JSON")
     }
 
-    /// Slice the JSON object for result-width `r` under `"by_r"`.
-    fn by_r(json: &str, r: usize) -> &str {
-        let key = format!("\"{r}\":");
-        let i = json.find("\"by_r\"").unwrap();
-        let j = json[i..].find(&key).unwrap() + i + key.len();
-        &json[j..]
+    fn by_r(json: &serde_json::Value, r: usize) -> &serde_json::Value {
+        &json["by_r"][r.to_string()]
     }
 
     /// Run the fingerprint gate for one const-generic result width R against its vector.
-    fn gate_build<const R: usize>(j: &str, r: usize) {
+    fn gate_build<const R: usize>(j: &serde_json::Value, r: usize) {
         let obj = by_r(j, r);
-        let n = vec_field(&j[j.find("\"build_n\"").unwrap()..], "build_n") as usize;
+        let n = vec_field(j, "build_n") as usize;
         let num_slots = vec_field(obj, "num_slots") as usize;
         let expect = vec_field(obj, "soln_fnv");
         let mut b = Banding::<R>::new(num_slots, 0);
@@ -298,22 +294,25 @@ mod tests {
         gate_build::<10>(&j, 10);
     }
 
-    /// Extract the JSON int array `"name": [ ... ]` as bits.
-    fn vec_array(json: &str, name: &str) -> Vec<u8> {
-        let pat = format!("\"{name}\":");
-        let i = json.find(&pat).unwrap() + pat.len();
-        let rest = &json[i..];
-        let lb = rest.find('[').unwrap();
-        let rb = rest.find(']').unwrap();
-        rest[lb + 1..rb]
-            .split(',')
-            .filter_map(|t| t.trim().parse::<u8>().ok())
+    fn vec_array(json: &serde_json::Value, name: &str) -> Vec<u8> {
+        json[name]
+            .as_array()
+            .unwrap_or_else(|| panic!("reference field {name} must be an array"))
+            .iter()
+            .map(|value| {
+                u8::try_from(
+                    value
+                        .as_u64()
+                        .unwrap_or_else(|| panic!("reference field {name} must contain integers")),
+                )
+                .unwrap_or_else(|_| panic!("reference field {name} contains a non-u8 value"))
+            })
             .collect()
     }
 
-    fn gate_query<const R: usize>(j: &str, r: usize) {
+    fn gate_query<const R: usize>(j: &serde_json::Value, r: usize) {
         let obj = by_r(j, r);
-        let n = vec_field(&j[j.find("\"build_n\"").unwrap()..], "build_n") as usize;
+        let n = vec_field(j, "build_n") as usize;
         let num_slots = vec_field(obj, "num_slots") as usize;
         let bk = keys(n, 0xA11CE);
         let mut b = Banding::<R>::new(num_slots, 0);
