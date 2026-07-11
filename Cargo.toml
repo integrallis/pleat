@@ -14,11 +14,10 @@ readme = "README.md"
 
 [dependencies]
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-rayon = { version = "1.10", optional = true }
 
 [features]
 default = ["parallel"]
-parallel = ["dep:rayon"]
+parallel = []  # slot-range parallel construction (uses std::thread; no extra deps)
 
 [dev-dependencies]
 criterion = "0.5"

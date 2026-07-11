@@ -19,30 +19,41 @@
 //! construction (all bit-identical), tunable false-positive rate via the result-width
 //! parameter, arbitrary hashable keys, batch queries, and serialization.
 
-pub mod banding;
-pub mod banding128;
+#![forbid(unsafe_op_in_unsafe_fn)]
+#![deny(missing_docs)]
+
 pub mod filter;
-pub mod hash;
-pub mod hash128;
+pub mod format;
+
+pub(crate) mod banding;
+pub(crate) mod banding128;
+pub(crate) mod hash;
+pub(crate) mod hash128;
 
 use core::hash::Hash;
 use xxhash_rust::xxh3::Xxh3;
 
-/// Hash an arbitrary key to the `u64` the filter operates on, using a fixed-seed xxh3 so results
-/// are stable across runs and machines. Build and query must use the same mapping — the
-/// `*_hashable` filter methods do this for you.
+/// Hash an arbitrary [`Hash`] key to the `u64` the filter operates on, using a fixed-seed xxh3.
+///
+/// **Portability caveat.** The Rust `Hash` trait is *not* guaranteed stable across platforms,
+/// architectures, or compiler versions — a type's `Hash` impl may feed different bytes (for
+/// example anything whose hashing depends on `usize` width). A filter built with
+/// [`crate::hash_key`] / the `*_hashable` methods is therefore reliable **only within the same
+/// process, target, and toolchain**. Do not persist such a filter and query it from a different
+/// build. For a durable, portable filter, hash your keys to canonical little-endian bytes
+/// yourself and use the `*_keys` (`u64`) methods.
 pub fn hash_key<K: Hash + ?Sized>(key: &K) -> u64 {
     let mut h = Xxh3::with_seed(0);
     key.hash(&mut h);
     core::hash::Hasher::finish(&h)
 }
+
 /// A pleating plan: how a key stream is folded into table-window order.
 ///
-/// `shift` selects the window size in slots (`1 << shift`); the paper's registered
-/// configuration uses `shift = 16` (≈768 KiB of banding state per window at w=64), and
-/// measured totals vary by <13% across shifts 13–20.
+/// `shift` selects the window size in slots (`1 << shift`); the default configuration uses
+/// `shift = 16` (≈768 KiB of banding state per window at w=64).
 #[derive(Clone, Copy, Debug)]
-pub struct PleatPlan {
+pub(crate) struct PleatPlan {
     pub num_starts: u64,
     pub shift: u32,
 }

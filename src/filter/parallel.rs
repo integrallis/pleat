@@ -69,28 +69,50 @@ pub fn from_keys_parallel_seeded<const R: usize>(
         consumed += len;
     }
 
-    // Band each range in its own thread against its private slice.
-    thread::scope(|scope| {
-        for ((base, slice), bkeys) in slices.into_iter().zip(buckets.iter()) {
-            scope.spawn(move || band_slice(slice, base, num_starts, seed, bkeys));
-        }
+    // Band each range in its own thread against its private slice; collect spilled keys.
+    let spilled: Vec<Vec<u64>> = thread::scope(|scope| {
+        let handles: Vec<_> = slices
+            .into_iter()
+            .zip(buckets.iter())
+            .map(|((base, slice), bkeys)| {
+                scope.spawn(move || band_slice(slice, base, num_starts, seed, bkeys))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    // Sequential tail: the deferred keys, banded against the whole matrix.
+    // Sequential tail: the pre-deferred boundary keys plus any keys whose reduction actually
+    // spilled past a thread's range (rare, but possible for adversarial inputs — handled
+    // safely, never panicking). All banded against the whole matrix.
     band.add_all(&deferred);
+    for spill in spilled {
+        band.add_all(&spill);
+    }
     band.solve()
 }
 
-/// Band `keys` into `slice`, which represents global slots `[base, base+slice.len())`.
-/// Every key here is guaranteed (by the deferral margin) to reduce entirely within the slice.
-fn band_slice(slice: &mut [u64], base: usize, num_starts: u64, seed: u64, keys: &[u64]) {
+/// Band `keys` into `slice` (global slots `[base, base+slice.len())`). The `G` margin makes
+/// crossing the upper boundary very unlikely, but Gaussian reduction can in principle advance
+/// past it; any key whose reduction would leave the slice is returned as *spilled* to be banded
+/// sequentially later, so this never indexes out of bounds.
+fn band_slice(
+    slice: &mut [u64],
+    base: usize,
+    num_starts: u64,
+    seed: u64,
+    keys: &[u64],
+) -> Vec<u64> {
     let len = slice.len();
-    for &k in keys {
+    let mut spilled = Vec::new();
+    'key: for &k in keys {
         let h = ribbon_hash(k, seed);
         let mut i = start(h, num_starts) as usize - base;
         let mut cr = coeff_row(h);
         loop {
-            debug_assert!(i < len, "non-deferred key crossed its slot range");
+            if i >= len {
+                spilled.push(k); // crossed the range boundary — defer, do not index OOB
+                continue 'key;
+            }
             let cr_at_i = slice[i];
             if cr_at_i == 0 {
                 slice[i] = cr;
@@ -105,12 +127,12 @@ fn band_slice(slice: &mut [u64], base: usize, num_starts: u64, seed: u64, keys: 
             cr >>= tz;
         }
     }
-    let _ = len;
+    spilled
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::banding::solution_fnv;
     use crate::filter::RibbonFilter;
 
@@ -134,7 +156,7 @@ mod tests {
         let k = keys(300_000, 0xA11CE);
         let seq = RibbonFilter::from_keys(&k);
         for t in [2usize, 4, 8] {
-            let par = from_keys_parallel_seeded::<7>(&k, 0, 16, t);
+            let par = super::from_keys_parallel_seeded::<7>(&k, 0, 16, t);
             assert_eq!(
                 solution_fnv(seq_segments(&seq)),
                 solution_fnv(par.segments()),

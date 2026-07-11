@@ -35,12 +35,14 @@ impl<const R: usize> Banding<R> {
         }
     }
 
+    #[cfg(feature = "parallel")]
     pub fn num_slots(&self) -> usize {
         self.coeff_rows.len()
     }
 
     /// Mutable access to the coefficient-row matrix, for the parallel builder to split into
     /// disjoint slot ranges. The band's `num_starts`/`raw_seed` are unchanged.
+    #[cfg(feature = "parallel")]
     pub fn coeff_rows_mut(&mut self) -> &mut [u64] {
         &mut self.coeff_rows
     }
@@ -155,13 +157,18 @@ impl<const R: usize> Solution<R> {
             for &k in kc {
                 let s = start(ribbon_hash(k, self.raw_seed), self.num_starts) as usize;
                 let seg = (s / W) * R;
+                // Bounds-checked: prefetch only a pointer that is genuinely in-bounds, so no
+                // wild pointer arithmetic even on a (validated but defensively re-checked) buffer.
                 #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    core::arch::x86_64::_mm_prefetch(
-                        self.segments.as_ptr().add(seg) as *const i8,
-                        core::arch::x86_64::_MM_HINT_T0,
-                    );
+                if let Some(p) = self.segments.get(seg) {
+                    unsafe {
+                        core::arch::x86_64::_mm_prefetch(
+                            p as *const _ as *const i8,
+                            core::arch::x86_64::_MM_HINT_T0,
+                        );
+                    }
                 }
+                #[cfg(not(target_arch = "x86_64"))]
                 let _ = seg;
             }
             for (k, o) in kc.iter().zip(oc.iter_mut()) {
@@ -198,8 +205,8 @@ impl<const R: usize> Solution<R> {
     }
 }
 
-/// FNV-1a over the little-endian bytes of the segment array — matches the reference's FNV over
-/// its serialized `char` buffer, so it is the gate value.
+/// FNV-1a over the segment bytes — the differential-gate fingerprint (test-only).
+#[cfg(test)]
 pub fn solution_fnv(segments: &[u64]) -> u64 {
     let mut fnv = 0xcbf2_9ce4_8422_2325u64;
     for &seg in segments {

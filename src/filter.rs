@@ -24,7 +24,7 @@ fn overhead(r: usize) -> f64 {
 
 /// Number of banding slots for `n` keys at result width `r`, rounded up to a multiple of 64
 /// (never fewer than 128 for the non-smash configuration). Mirrors `RoundUpNumSlots`.
-pub fn num_slots_for(n: usize, r: usize) -> usize {
+pub(crate) fn num_slots_for(n: usize, r: usize) -> usize {
     let raw = (overhead(r) * n as f64) as usize;
     let mut s = raw.div_ceil(W) * W;
     if s == W {
@@ -43,13 +43,26 @@ pub struct Ribbon<const R: usize> {
 /// Homogeneous ribbon filter at the default R=7 (~0.8% false-positive rate, ~7.6 bits/key).
 pub type RibbonFilter = Ribbon<7>;
 
+impl<const R: usize> core::fmt::Debug for Ribbon<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Ribbon")
+            .field("w", &64u32)
+            .field("r", &R)
+            .field("bytes", &self.size_bytes())
+            .finish()
+    }
+}
+
 impl<const R: usize> Ribbon<R> {
     /// Build from keys in arrival order (seed 0).
     pub fn from_keys(keys: &[u64]) -> Self {
         Self::from_keys_seeded(keys, 0)
     }
 
+    /// Build in arrival order with an explicit seed (homogeneous ribbon does not fail, so the
+    /// seed only diversifies the hash; default `from_keys` uses seed 0).
     pub fn from_keys_seeded(keys: &[u64], seed: u64) -> Self {
+        Self::check_width();
         let mut b = Banding::<R>::new(num_slots_for(keys.len(), R), seed);
         b.add_all(keys);
         Self { soln: b.solve() }
@@ -61,7 +74,10 @@ impl<const R: usize> Ribbon<R> {
         Self::from_keys_pleated_seeded(keys, 0, DEFAULT_WINDOW_SHIFT)
     }
 
+    /// Pleated build with explicit seed and window shift (`1 << window_shift` slots per
+    /// window; the default is [`DEFAULT_WINDOW_SHIFT`]).
     pub fn from_keys_pleated_seeded(keys: &[u64], seed: u64, window_shift: u32) -> Self {
+        Self::check_width();
         let num_slots = num_slots_for(keys.len(), R);
         let num_starts = (num_slots - W + 1) as u64;
         let plan = PleatPlan::new(num_starts, window_shift);
@@ -110,36 +126,45 @@ impl<const R: usize> Ribbon<R> {
         self.size_bytes() as f64 * 8.0 / n as f64
     }
 
-    /// Serialize to a portable little-endian byte buffer: `[num_starts u64][raw_seed u64]`
-    /// followed by the solution segments. Keys are not stored.
+    /// Serialize to a versioned, self-describing, checksummed byte buffer (see [`crate::format`]).
+    /// Keys are not stored. Portable little-endian; decode rejects corruption.
     pub fn to_bytes(&self) -> Vec<u8> {
         let (num_starts, raw_seed, segs) = self.soln.parts();
-        let mut out = Vec::with_capacity(16 + segs.len() * 8);
-        out.extend_from_slice(&num_starts.to_le_bytes());
-        out.extend_from_slice(&raw_seed.to_le_bytes());
+        let mut buf = crate::format::write_header(
+            crate::format::FAMILY_HOMOG,
+            R as u8,
+            raw_seed,
+            num_starts,
+            segs.len() as u64,
+        );
         for &s in segs {
-            out.extend_from_slice(&s.to_le_bytes());
+            buf.extend_from_slice(&s.to_le_bytes());
         }
-        out
+        crate::format::finish(buf)
     }
 
-    /// Reconstruct a filter from [`RibbonFilter::to_bytes`]. Returns `None` on a malformed buffer.
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 16 || !(bytes.len() - 16).is_multiple_of(8) {
-            return None;
-        }
-        let num_starts = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
-        let raw_seed = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
-        let segs = bytes[16..]
+    /// Reconstruct a filter from [`RibbonFilter::to_bytes`]. Every field is validated (magic,
+    /// family, width, geometry, length, checksum) before use; a malformed buffer returns a
+    /// [`crate::format::DecodeError`] rather than panicking or yielding an unsound filter.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::format::DecodeError> {
+        Self::check_width();
+        let (hdr, payload) =
+            crate::format::decode(bytes, crate::format::FAMILY_HOMOG, R as u8, 8, W)?;
+        let segs: Vec<u64> = payload
             .chunks_exact(8)
             .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
             .collect();
-        Some(Self {
-            soln: Solution::from_parts(num_starts, raw_seed, segs),
+        Ok(Self {
+            soln: Solution::from_parts(hdr.num_starts, hdr.seed, segs),
         })
     }
 
-    #[cfg(test)]
+    #[inline]
+    fn check_width() {
+        const { assert!(R >= 1 && R <= 32, "ribbon result width R must be in 1..=32") };
+    }
+
+    #[cfg(all(test, feature = "parallel"))]
     pub(crate) fn solution_segments(&self) -> &[u64] {
         self.soln.segments()
     }
@@ -147,8 +172,6 @@ impl<const R: usize> Ribbon<R> {
 
 #[cfg(feature = "parallel")]
 mod parallel;
-#[cfg(feature = "parallel")]
-pub use parallel::from_keys_parallel_seeded;
 
 #[cfg(feature = "parallel")]
 impl<const R: usize> Ribbon<R> {
@@ -158,6 +181,7 @@ impl<const R: usize> Ribbon<R> {
         Self::from_keys_parallel_seeded(keys, 0, DEFAULT_WINDOW_SHIFT, threads)
     }
 
+    /// Parallel build with explicit seed, window shift, and thread count.
     pub fn from_keys_parallel_seeded(
         keys: &[u64],
         seed: u64,
@@ -165,7 +189,7 @@ impl<const R: usize> Ribbon<R> {
         threads: usize,
     ) -> Self {
         Self {
-            soln: from_keys_parallel_seeded::<R>(keys, seed, window_shift, threads),
+            soln: parallel::from_keys_parallel_seeded::<R>(keys, seed, window_shift, threads),
         }
     }
 }
@@ -271,15 +295,13 @@ mod prod_tests {
         for x in [1u64, 3, 999_999_999, u64::MAX] {
             assert_eq!(f.contains(x), g.contains(x));
         }
-        assert!(RibbonFilter::from_bytes(&[0u8; 5]).is_none());
+        assert!(RibbonFilter::from_bytes(&[0u8; 5]).is_err());
     }
 }
 
 // ---- Standard ribbon (w=128), the RocksDB production shape ----
 
-use crate::banding128::{
-    build_std128, build_std128_pleated, solution_from_bytes, solution_to_bytes, Solution128,
-};
+use crate::banding128::{build_std128, build_std128_pleated, Solution128, W128};
 
 /// A **standard** (non-homogeneous) ribbon filter at w=128 with `R` result bits — the shape
 /// RocksDB ships. Slightly tighter space than homogeneous ribbon for the same FPR, at the cost
@@ -289,13 +311,25 @@ pub struct StdRibbon<const R: usize> {
     soln: Solution128<R>,
 }
 
+impl<const R: usize> core::fmt::Debug for StdRibbon<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StdRibbon")
+            .field("w", &128u32)
+            .field("r", &R)
+            .field("bytes", &self.size_bytes())
+            .finish()
+    }
+}
+
 impl<const R: usize> StdRibbon<R> {
     /// Build in arrival order.
     pub fn from_keys(keys: &[u64]) -> Option<Self> {
+        Self::check_width();
         build_std128::<R>(keys).map(|soln| Self { soln })
     }
     /// Build with pleated construction (bit-identical to [`StdRibbon::from_keys`], faster at scale).
     pub fn from_keys_pleated(keys: &[u64]) -> Option<Self> {
+        Self::check_width();
         build_std128_pleated::<R>(keys, DEFAULT_WINDOW_SHIFT).map(|soln| Self { soln })
     }
     /// Build from arbitrary hashable items (each hashed via [`crate::hash_key`]), pleated.
@@ -310,6 +344,7 @@ impl<const R: usize> StdRibbon<R> {
         crate::banding128::build_std128_parallel::<R>(keys, DEFAULT_WINDOW_SHIFT, threads)
             .map(|soln| Self { soln })
     }
+    /// Is `key` possibly in the set? Never a false negative; false-positive rate ~2^-R.
     #[inline]
     pub fn contains(&self, key: u64) -> bool {
         self.soln.contains(key)
@@ -329,14 +364,53 @@ impl<const R: usize> StdRibbon<R> {
     pub fn false_positive_rate(&self) -> f64 {
         2f64.powi(-(R as i32))
     }
+    /// Serialized payload size in bytes (keys are not stored).
     pub fn size_bytes(&self) -> usize {
         self.soln.segments().len() * 16
     }
-    pub fn to_bytes(&self) -> Vec<u8> {
-        solution_to_bytes(&self.soln)
+    /// Bits per key for `n` inserted keys (diagnostic).
+    pub fn bits_per_key(&self, n: usize) -> f64 {
+        if n == 0 {
+            return f64::INFINITY;
+        }
+        self.size_bytes() as f64 * 8.0 / n as f64
     }
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        solution_from_bytes::<R>(bytes).map(|soln| Self { soln })
+    /// Serialize to a versioned, checksummed byte buffer (see [`crate::format`]).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let (num_starts, ordinal_seed, segs) = self.soln.parts();
+        let mut buf = crate::format::write_header(
+            crate::format::FAMILY_STD,
+            R as u8,
+            ordinal_seed as u64,
+            num_starts,
+            segs.len() as u64,
+        );
+        for &s in segs {
+            buf.extend_from_slice(&s.to_le_bytes());
+        }
+        crate::format::finish(buf)
+    }
+    /// Reconstruct from [`StdRibbon::to_bytes`], validating every field. Returns a
+    /// [`crate::format::DecodeError`] on any corruption or type mismatch.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::format::DecodeError> {
+        Self::check_width();
+        let (hdr, payload) =
+            crate::format::decode(bytes, crate::format::FAMILY_STD, R as u8, 16, W128)?;
+        if hdr.seed >= crate::banding128::SEED_COUNT as u64 {
+            return Err(crate::format::DecodeError::BadSeed);
+        }
+        let segs: Vec<u128> = payload
+            .chunks_exact(16)
+            .map(|c| u128::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        Ok(Self {
+            soln: Solution128::from_parts(hdr.num_starts, hdr.seed as u32, segs),
+        })
+    }
+
+    #[inline]
+    fn check_width() {
+        const { assert!(R >= 1 && R <= 32, "ribbon result width R must be in 1..=32") };
     }
 }
 
@@ -457,5 +531,85 @@ mod batch_tests {
         let mut out2 = vec![false; probes.len()];
         g.contains_batch(&probes, &mut out2);
         assert!(out2.iter().zip(&probes).all(|(&o, &p)| o == g.contains(p)));
+    }
+}
+
+#[cfg(test)]
+mod soundness_tests {
+    use super::*;
+    use crate::format::DecodeError;
+
+    fn keys(n: usize) -> Vec<u64> {
+        (0..n as u64)
+            .map(|i| i.wrapping_mul(0x9e3779b97f4a7c15))
+            .collect()
+    }
+
+    #[test]
+    fn decode_rejects_malformed_and_mismatched_buffers() {
+        let f = RibbonFilter::from_keys_pleated(&keys(50_000));
+        let bytes = f.to_bytes();
+        // Round-trip is exact.
+        let g = RibbonFilter::from_bytes(&bytes).unwrap();
+        assert_eq!(f.size_bytes(), g.size_bytes());
+
+        // Empty / truncated / garbage never panic; they error.
+        assert_eq!(
+            RibbonFilter::from_bytes(&[]).unwrap_err(),
+            DecodeError::TooShort
+        );
+        assert_eq!(
+            RibbonFilter::from_bytes(&bytes[..bytes.len() - 1]).unwrap_err(),
+            DecodeError::BadChecksum
+        );
+        let mut flipped = bytes.clone();
+        flipped[40] ^= 1;
+        assert!(RibbonFilter::from_bytes(&flipped).is_err());
+
+        // A homogeneous blob must not load as standard, nor as a different width.
+        assert_eq!(
+            StdRibbon::<7>::from_bytes(&bytes).unwrap_err(),
+            DecodeError::WrongFamily
+        );
+        assert_eq!(
+            Ribbon::<8>::from_bytes(&bytes).unwrap_err(),
+            DecodeError::WrongResultWidth
+        );
+
+        // Standard blob likewise cannot be loaded as homogeneous.
+        let s = StdRibbon::<7>::from_keys_pleated(&keys(50_000))
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            RibbonFilter::from_bytes(&s).unwrap_err(),
+            DecodeError::WrongFamily
+        );
+        assert!(StdRibbon::<7>::from_bytes(&s)
+            .unwrap()
+            .contains(keys(50_000)[0]));
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_handles_adversarial_clustered_starts() {
+        // Keys engineered to cluster many starts near window boundaries stress the spill path;
+        // the result must still be a correct filter (no panic, no false negatives), bit-identical.
+        let mut k: Vec<u64> = Vec::new();
+        for base in 0..2000u64 {
+            for j in 0..100u64 {
+                k.push(base.wrapping_mul(0x1_0000).wrapping_add(j));
+            }
+        }
+        let seq = RibbonFilter::from_keys(&k);
+        let par = RibbonFilter::from_keys_parallel(&k, 8);
+        assert!(
+            k.iter().all(|&x| par.contains(x)),
+            "adversarial parallel false negative"
+        );
+        assert_eq!(
+            seq.to_bytes(),
+            par.to_bytes(),
+            "adversarial parallel not bit-identical"
+        );
     }
 }

@@ -149,6 +149,7 @@ impl<const R: usize> Solution128<R> {
     pub fn segments(&self) -> &[u128] {
         &self.segments
     }
+    #[cfg(test)]
     pub fn ordinal_seed(&self) -> u32 {
         self.ordinal_seed
     }
@@ -161,13 +162,18 @@ impl<const R: usize> Solution128<R> {
             for &k in kc {
                 let s = start(ribbon_hash(k, self.raw_seed as u64), self.num_starts) as usize;
                 let seg = (s / W128) * R;
+                // Bounds-checked: prefetch only a pointer that is genuinely in-bounds, so no
+                // wild pointer arithmetic even on a (validated but defensively re-checked) buffer.
                 #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    core::arch::x86_64::_mm_prefetch(
-                        self.segments.as_ptr().add(seg) as *const i8,
-                        core::arch::x86_64::_MM_HINT_T0,
-                    );
+                if let Some(p) = self.segments.get(seg) {
+                    unsafe {
+                        core::arch::x86_64::_mm_prefetch(
+                            p as *const _ as *const i8,
+                            core::arch::x86_64::_MM_HINT_T0,
+                        );
+                    }
                 }
+                #[cfg(not(target_arch = "x86_64"))]
                 let _ = seg;
             }
             for (k, o) in kc.iter().zip(oc.iter_mut()) {
@@ -294,8 +300,9 @@ pub fn build_std128_parallel<const R: usize>(
             base += len;
         }
 
-        // Parallel band; a thread returns false if any key hits an inconsistent dependence.
-        let ok = thread::scope(|scope| {
+        // Parallel band; each thread returns None on an inconsistent dependence (seed fails) or
+        // Some(spilled) — keys whose reduction crossed the boundary, to be banded sequentially.
+        let results: Vec<Option<Vec<u64>>> = thread::scope(|scope| {
             let handles: Vec<_> = cslices
                 .into_iter()
                 .zip(rslices)
@@ -304,25 +311,41 @@ pub fn build_std128_parallel<const R: usize>(
                     scope.spawn(move || band_range_128::<R>(cs, rs, cbase, num_starts, raw, bk))
                 })
                 .collect();
-            handles.into_iter().all(|h| h.join().unwrap())
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        if !ok {
+        if results.iter().any(Option::is_none) {
             continue 'seed;
         }
-        // Sequential tail: deferred keys over the whole matrix.
+        // Sequential tail: pre-deferred boundary keys + any spilled keys, over the whole matrix.
+        let mut tail_ok = true;
         for &k in &deferred {
             if !b.add(k) {
-                continue 'seed;
+                tail_ok = false;
+                break;
             }
+        }
+        if tail_ok {
+            'tail: for spill in results.into_iter().flatten() {
+                for k in spill {
+                    if !b.add(k) {
+                        tail_ok = false;
+                        break 'tail;
+                    }
+                }
+            }
+        }
+        if !tail_ok {
+            continue 'seed;
         }
         return Some(b.into_solution());
     }
     None
 }
 
-/// Band `keys` into `(coeff, result)` slices for global slots `[base, base+len)`. Every key is
-/// guaranteed by the deferral margin to reduce within the slice. Returns false on an
-/// inconsistent dependence.
+/// Band `keys` into `(coeff, result)` slices for global slots `[base, base+len)`. The `G` margin
+/// makes boundary crossing very unlikely, but if a reduction would leave the slice the key is
+/// returned as spilled (banded sequentially later) rather than indexing out of bounds. Returns
+/// `None` on an inconsistent dependence (the seed-failure signal), else `Some(spilled)`.
 #[cfg(feature = "parallel")]
 fn band_range_128<const R: usize>(
     coeff: &mut [u128],
@@ -331,13 +354,19 @@ fn band_range_128<const R: usize>(
     num_starts: u64,
     raw: u64,
     keys: &[u64],
-) -> bool {
-    for &k in keys {
+) -> Option<Vec<u64>> {
+    let len = coeff.len();
+    let mut spilled = Vec::new();
+    'key: for &k in keys {
         let h = ribbon_hash(k, raw);
         let mut i = start(h, num_starts) as usize - base;
         let mut cr = coeff_row_128(h);
         let mut rr = result_row(h);
         loop {
+            if i >= len {
+                spilled.push(k); // crossed the boundary — defer, do not index OOB
+                continue 'key;
+            }
             let cr_at_i = coeff[i];
             if cr_at_i == 0 {
                 coeff[i] = cr;
@@ -348,7 +377,7 @@ fn band_range_128<const R: usize>(
             rr ^= result[i];
             if cr == 0 {
                 if rr != 0 {
-                    return false;
+                    return None; // inconsistent dependence -> this seed fails
                 }
                 break;
             }
@@ -357,41 +386,29 @@ fn band_range_128<const R: usize>(
             cr >>= tz;
         }
     }
-    true
+    Some(spilled)
 }
 
-/// Serialize a solution: `[ordinal_seed u32][num_starts u64]` then the u128 segments (LE).
-pub fn solution_to_bytes<const R: usize>(s: &Solution128<R>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12 + s.segments.len() * 16);
-    out.extend_from_slice(&s.ordinal_seed.to_le_bytes());
-    out.extend_from_slice(&s.num_starts.to_le_bytes());
-    for &seg in &s.segments {
-        out.extend_from_slice(&seg.to_le_bytes());
+impl<const R: usize> Solution128<R> {
+    /// Serialization components: (num_starts, ordinal_seed, segments).
+    pub(crate) fn parts(&self) -> (u64, u32, &[u128]) {
+        (self.num_starts, self.ordinal_seed, &self.segments)
     }
-    out
-}
 
-/// Reconstruct a solution from [`solution_to_bytes`].
-pub fn solution_from_bytes<const R: usize>(bytes: &[u8]) -> Option<Solution128<R>> {
-    if bytes.len() < 12 || !(bytes.len() - 12).is_multiple_of(16) {
-        return None;
+    /// Reconstruct from validated components (used by the versioned decoder in `format`).
+    /// `ordinal_seed` must be `< SEED_COUNT`; geometry is validated by the caller.
+    pub(crate) fn from_parts(num_starts: u64, ordinal_seed: u32, segments: Vec<u128>) -> Self {
+        Self {
+            segments,
+            num_starts,
+            raw_seed: ordinal_to_raw_seed(ordinal_seed),
+            ordinal_seed,
+        }
     }
-    let ordinal_seed = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
-    let num_starts = u64::from_le_bytes(bytes[4..12].try_into().ok()?);
-    let segments = bytes[12..]
-        .chunks_exact(16)
-        .map(|c| u128::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-    Some(Solution128 {
-        segments,
-        num_starts,
-        raw_seed: ordinal_to_raw_seed(ordinal_seed),
-        ordinal_seed,
-    })
 }
 
-/// FNV-1a over the little-endian bytes of the u128 segments (matches the reference serialized
-/// buffer, so it is the gate value).
+/// FNV-1a over the u128 segment bytes — the differential-gate fingerprint (test-only).
+#[cfg(test)]
 pub fn solution_fnv_128(segments: &[u128]) -> u64 {
     let mut fnv = 0xcbf2_9ce4_8422_2325u64;
     for &seg in segments {
