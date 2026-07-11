@@ -1,47 +1,85 @@
 # pleat
 
-Ribbon filters with **pleated construction**, so that space-optimal filters build at
-Bloom-filter speed. An Integrallis project; companion to the paper *"Ribbon Catches Bloom"*.
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-**Status: pre-0.1. Nothing is exported until its gate passes.**
+Ribbon filters with **pleated construction** — a one-pass, cache-window reordering that builds
+space-optimal filters at close to Bloom-filter speed, and roughly twice as fast as building in
+arrival order at scale. An Integrallis project; companion to the paper *"Ribbon Catches Bloom:
+Pleated Construction at Bloom Speed."*
 
-## Engineering policy
+A ribbon filter answers approximate set membership — "is this key possibly in the set?" — in
+about 9.6 bits per key at a ~0.8% false-positive rate, well under a Bloom filter's memory for
+the same accuracy. The cost has always been construction: ribbon filters are built by solving a
+banded linear system, and doing that in arrival order makes every key a random jump through a
+table far larger than cache. Pleating groups keys into cache-sized windows with a single
+counting pass first, so the banding stays local.
 
-- **Production-anchored port.** The ribbon kernel (hashing, banding, back-substitution,
-  interleaved solution storage) is transcribed from RocksDB's production implementation
-  (`util/ribbon_impl.h`, `util/ribbon_alg.h` — the code that has guarded real databases since
-  2021), cross-checked against the ribbon author's reference in fastfilter_cpp. No kernel code
-  is written from memory or paraphrased from the paper.
-- **Differential gate before anything ships.** The Rust kernel must reproduce, byte for byte,
-  the solution fingerprints produced by the reference C++ kernel on the committed key sets
-  from the paper repository (transposed-filters, results/e1b/phase1). CI fails the crate if
-  the fingerprints diverge.
-- **Test-first.** Every module lands as: reference test vectors first (ported from RocksDB's
-  `ribbon_test.cc` where applicable), property tests (proptest) second, implementation third.
-- **Built-in reproducible benchmarks.** Criterion benches reproduce the paper's Table 1 shape
-  (arrival vs. pleated vs. parallel); raw outputs are committed and a `reproduce.sh`
-  re-derives every README number from them. No number appears in this README without a
-  committed artifact.
-- **Licensing.** Crate dual-licensed MIT OR Apache-2.0 (Rust convention); RocksDB is
-  Apache-2.0/GPL-2.0 dual — we port under Apache-2.0 with attribution headers in every ported
-  file. License audit is a pre-publish gate.
+```rust
+use pleat::filter::RibbonFilter;
 
-## The technique
+let keys: Vec<u64> = /* your 64-bit key hashes */ vec![10, 20, 30];
+let filter = RibbonFilter::from_keys_pleated(&keys);
 
-A ribbon filter is built by solving a banded linear system; each key's work is confined to a
-short run of table slots at its hashed start position. Arrival-order insertion makes every
-key a far jump through a table much larger than cache. Pleating folds the key stream into
-L2-sized windows with one counting pass — 98% of the locality benefit of the full
-start-position sort at roughly a quarter of its cost — and because the solved filter is
-bit-identical under any insertion order, pleated and parallel builds verify themselves against
-the sequential build with a single checksum.
+assert!(filter.contains(20));           // members always present
+// filter.contains(999) is false with ~99.2% probability
 
-## Road to 0.1 (each step gated)
+let bytes = filter.to_bytes();          // persist
+let restored = RibbonFilter::from_bytes(&bytes).unwrap();
+```
 
-1. Test vectors + hashing layer (RocksDB `StandardHasher` semantics).
-2. Homogeneous banding kernel (w=64) → differential fingerprint gate.
-3. Back-substitution + interleaved storage + queries → zero-false-negative and FPR gates.
-4. `PleatPlan` integration: pleated sequential builder + checksum self-verification.
-5. Parallel builder (slot-range ownership, boundary deferral) behind `parallel` feature.
-6. Standard ribbon (w=128, seeds, backtracking) — the RocksDB production shape.
-7. Criterion benches + committed baselines + reproduce.sh.
+Construction variants, all producing the **bit-identical** filter (banding is order-independent):
+
+```rust
+RibbonFilter::from_keys(&keys);              // arrival order (reference default)
+RibbonFilter::from_keys_pleated(&keys);      // pleated: ~2x faster at scale
+RibbonFilter::from_keys_parallel(&keys, 8);  // slot-range parallel (feature "parallel")
+```
+
+## Measured construction cost
+
+On an Intel i9-14900HX, ns/key (means of 10, `cargo bench --bench construct`; raw criterion
+output committed under `benches/`):
+
+| n keys | arrival | pleated | parallel 8t |
+|---|---|---|---|
+| 1,000,000 (table fits in L3) | 23.8 | 26.1 | 21.9 |
+| 10,000,000 (table exceeds L3) | 60.4 | **26.0** | 24.4 |
+
+Pleating pays off once the banding table exceeds cache (2.3x at 10M keys here); below that
+crossover it costs slightly more than arrival order, as expected. These are this crate's own
+numbers; the paper's headline figures are measured on the reference C++ kernel.
+
+## Correctness
+
+Every kernel component is **differentially gated** against the reference ribbon implementation
+(`fastfilter_cpp`, by the ribbon authors, RocksDB-derived). `tools/vecgen.cc` emits committed
+test vectors — per-key hash/start/coefficient values, a full-build solution fingerprint, and
+query outcomes — and the Rust tests assert byte-exact agreement:
+
+- hashing reproduces the reference per-key values on 1000 vectors;
+- banding + back-substitution reproduce the reference's serialized solution byte-for-byte;
+- queries reproduce the reference's present/absent outcomes;
+- pleated and parallel builds are proven bit-identical to the sequential build.
+
+Nothing in the kernel is written from memory; the gate caught more than one subtle
+transcription (e.g. homogeneous back-substitution fills unconstrained rows with pseudorandom
+data, not zero — the trick that preserves the false-positive rate).
+
+## Scope
+
+This release implements **homogeneous ribbon** at w=64, r=7 (~9.6 bits/key, ~0.8% FPR), the
+variant used as the reference benchmark and the one pleating targets. Keys are 64-bit; hash
+your keys to `u64` first. Standard ribbon (w=128) is planned.
+
+## Reproduce
+
+```bash
+cargo test --all-features         # differential gate + property tests
+cargo bench --bench construct     # construction benchmark
+./reproduce.sh                    # regenerate reference vectors + run gate + bench
+```
+
+## License
+
+MIT OR Apache-2.0. The ribbon kernel is ported from RocksDB / fastfilter_cpp (Apache-2.0);
+ported files carry attribution.

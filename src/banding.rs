@@ -107,10 +107,10 @@ impl Banding {
                 } else {
                     0
                 };
-                for j in 0..R {
-                    let tmp = state[j] << 1;
+                for (j, sj) in state.iter_mut().enumerate() {
+                    let tmp = *sj << 1;
                     let bit = (((tmp & cr).count_ones() & 1) as u64) ^ (((rr >> j) & 1) as u64);
-                    state[j] = tmp | bit;
+                    *sj = tmp | bit;
                 }
             }
             let segment_num = block * R;
@@ -130,6 +130,16 @@ pub struct Solution {
 impl Solution {
     pub fn segments(&self) -> &[u64] {
         &self.segments
+    }
+
+    /// Borrow the serialization components: (num_starts, raw_seed, segments).
+    pub fn parts(&self) -> (u64, u64, &[u64]) {
+        (self.num_starts, self.raw_seed, &self.segments)
+    }
+
+    /// Reconstruct from serialized components (used by `RibbonFilter::from_bytes`).
+    pub fn from_parts(num_starts: u64, raw_seed: u64, segments: Vec<u64>) -> Self {
+        Self { segments, num_starts, raw_seed }
     }
 
     /// Membership query (InterleavedPrepareQuery + InterleavedFilterQuery, r=7 fixed columns,

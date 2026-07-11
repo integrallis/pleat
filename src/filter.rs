@@ -78,6 +78,35 @@ impl RibbonFilter {
         self.size_bytes() as f64 * 8.0 / n as f64
     }
 
+    /// Serialize to a portable little-endian byte buffer: `[num_starts u64][raw_seed u64]`
+    /// followed by the solution segments. Keys are not stored.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let (num_starts, raw_seed, segs) = self.soln.parts();
+        let mut out = Vec::with_capacity(16 + segs.len() * 8);
+        out.extend_from_slice(&num_starts.to_le_bytes());
+        out.extend_from_slice(&raw_seed.to_le_bytes());
+        for &s in segs {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        out
+    }
+
+    /// Reconstruct a filter from [`to_bytes`]. Returns `None` on a malformed buffer.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 16 || !(bytes.len() - 16).is_multiple_of(8) {
+            return None;
+        }
+        let num_starts = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+        let raw_seed = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+        let segs = bytes[16..]
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        Some(Self {
+            soln: Solution::from_parts(num_starts, raw_seed, segs),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn solution_segments(&self) -> &[u64] {
         self.soln.segments()
@@ -154,5 +183,33 @@ mod tests {
         let fpr = fp as f64 / 200_000.0;
         assert!(fpr < 0.02, "FPR {fpr} too high"); // r=7 => ~0.78%
         assert!(f.bits_per_key(n) < 10.0);
+    }
+}
+
+#[cfg(test)]
+mod prod_tests {
+    use super::*;
+
+    #[test]
+    fn empty_and_tiny_inputs_do_not_panic() {
+        let f = RibbonFilter::from_keys(&[]);
+        assert!(!f.contains(12345) || f.contains(12345)); // no member; just must not panic
+        let f2 = RibbonFilter::from_keys_pleated(&[7, 42, 1000]);
+        assert!(f2.contains(7) && f2.contains(42) && f2.contains(1000));
+    }
+
+    #[test]
+    fn roundtrip_serialization_preserves_queries() {
+        let k: Vec<u64> = (0..100_000u64).map(|i| i.wrapping_mul(0x9e3779b97f4a7c15)).collect();
+        let f = RibbonFilter::from_keys_pleated(&k);
+        let bytes = f.to_bytes();
+        let g = RibbonFilter::from_bytes(&bytes).expect("valid buffer");
+        assert_eq!(f.size_bytes(), g.size_bytes());
+        assert!(k.iter().all(|&x| g.contains(x)), "false negative after roundtrip");
+        // A few absent keys must answer identically before/after.
+        for x in [1u64, 3, 999_999_999, u64::MAX] {
+            assert_eq!(f.contains(x), g.contains(x));
+        }
+        assert!(RibbonFilter::from_bytes(&[0u8; 5]).is_none());
     }
 }

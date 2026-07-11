@@ -3,11 +3,12 @@ name = "pleat"
 version = "0.1.0"
 edition = "2021"
 description = "Ribbon filters with pleated (partition-instead-of-sort) construction: build at Bloom-filter speed, verify by checksum."
-license = "MIT"
+license = "MIT OR Apache-2.0"
 authors = ["Brian Sam-Bodden <bsb@integrallis.com>"]
 repository = "https://github.com/integrallis/pleat"
 keywords = ["ribbon-filter", "bloom-filter", "amq", "probabilistic", "filter"]
 categories = ["data-structures", "algorithms"]
+readme = "README.md"
 
 [dependencies]
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
@@ -19,3 +20,7 @@ parallel = ["dep:rayon"]
 
 [dev-dependencies]
 criterion = "0.5"
+
+[[bench]]
+name = "construct"
+harness = false
