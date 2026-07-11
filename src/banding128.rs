@@ -100,8 +100,11 @@ impl<const R: usize> Banding128<R> {
             b.reset(ordinal);
             let raw = b.raw_seed as u64;
             let plan = crate::PleatPlan::new(num_starts, window_shift);
-            let (ordered, _) = plan.pleat(keys, |k| start(ribbon_hash(k, raw), num_starts));
-            scratch.copy_from_slice(&ordered);
+            let _counts = plan.pleat_into(
+                keys,
+                |k| start(ribbon_hash(k, raw), num_starts),
+                &mut scratch,
+            );
             if scratch.iter().all(|&k| b.add(k)) {
                 return Some(b);
             }
@@ -170,8 +173,10 @@ impl<const R: usize> Solution128<R> {
                 let seg = (s / W128) * R;
                 // Bounds-checked: prefetch only a pointer that is genuinely in-bounds, so no
                 // wild pointer arithmetic even on a (validated but defensively re-checked) buffer.
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", not(miri)))]
                 if let Some(p) = self.segments.get(seg) {
+                    // SAFETY: `p` came from `slice::get`, so it is a valid in-bounds address;
+                    // `_mm_prefetch` only uses it as a cache hint and does not dereference in Rust.
                     unsafe {
                         core::arch::x86_64::_mm_prefetch(
                             p as *const _ as *const i8,
@@ -179,7 +184,7 @@ impl<const R: usize> Solution128<R> {
                         );
                     }
                 }
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(any(not(target_arch = "x86_64"), miri))]
                 let _ = seg;
             }
             for (k, o) in kc.iter().zip(oc.iter_mut()) {
@@ -239,6 +244,7 @@ pub fn build_std128_pleated<const R: usize>(
     keys: &[u64],
     window_shift: u32,
 ) -> Option<Solution128<R>> {
+    let _ = crate::filter::window_size(window_shift);
     let num_slots = num_slots_for_128(keys.len(), R);
     Banding128::<R>::find_seed_pleated(num_slots, keys, window_shift).map(Banding128::into_solution)
 }
@@ -261,7 +267,7 @@ pub fn build_std128_parallel<const R: usize>(
     }
     let mut b = Banding128::<R>::new(num_slots);
     let num_starts = b.num_starts;
-    let window = 1usize << window_shift;
+    let window = crate::filter::window_size(window_shift);
     let n_windows = num_slots.div_ceil(window);
     let threads = threads.min(n_windows);
 
@@ -271,17 +277,20 @@ pub fn build_std128_parallel<const R: usize>(
         // Thread range bounds, window-aligned at ~equal key counts is overkill; even windows.
         let per = n_windows.div_ceil(threads);
         let mut bounds: Vec<usize> = (0..=threads)
-            .map(|t| (t * per * window).min(num_slots))
+            .map(|t| t.saturating_mul(per).saturating_mul(window).min(num_slots))
             .collect();
         bounds.dedup();
         let nt = bounds.len() - 1;
 
-        let mut buckets: Vec<Vec<u64>> = vec![Vec::new(); nt];
-        let mut deferred: Vec<u64> = Vec::new();
+        let bucket_capacity = keys.len().div_ceil(nt);
+        let mut buckets: Vec<Vec<u64>> = (0..nt)
+            .map(|_| Vec::with_capacity(bucket_capacity))
+            .collect();
+        let mut deferred: Vec<u64> = Vec::with_capacity(keys.len() / 4);
         for &k in keys {
             let s = start(ribbon_hash(k, raw), num_starts) as usize;
             let t = bounds.partition_point(|&x| x <= s) - 1;
-            if t + 1 < nt && s + G >= bounds[t + 1] {
+            if t + 1 < nt && s.saturating_add(G) >= bounds[t + 1] {
                 deferred.push(k);
             } else {
                 buckets[t].push(k);
@@ -444,44 +453,48 @@ mod tests {
             })
             .collect()
     }
-    fn load() -> String {
-        std::fs::read_to_string(
+    fn load() -> serde_json::Value {
+        let text = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/std_w128_r7.json"),
         )
-        .unwrap()
+        .expect("reference vectors must be present");
+        serde_json::from_str(&text).expect("reference vectors must be valid JSON")
     }
-    fn num(j: &str, name: &str) -> u64 {
-        let p = format!("\"{name}\":");
-        let i = j.find(&p).unwrap() + p.len();
-        let r = j[i..].trim_start().trim_start_matches('"');
-        let e = r.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(r.len());
+    fn num(value: &serde_json::Value, name: &str) -> u64 {
         if name == "soln_fnv" {
-            u64::from_str_radix(&r[..e], 16).unwrap()
+            let hex = value[name]
+                .as_str()
+                .expect("soln_fnv must be a hexadecimal string");
+            u64::from_str_radix(hex, 16).expect("soln_fnv must be valid hexadecimal")
         } else {
-            r[..e].parse().unwrap()
+            value[name]
+                .as_u64()
+                .unwrap_or_else(|| panic!("missing or non-u64 reference field {name}"))
         }
     }
-    fn bits(j: &str, name: &str) -> Vec<u8> {
-        let p = format!("\"{name}\":");
-        let i = j.find(&p).unwrap() + p.len();
-        let r = &j[i..];
-        let (a, b) = (r.find('[').unwrap(), r.find(']').unwrap());
-        r[a + 1..b]
-            .split(',')
-            .filter_map(|t| t.trim().parse().ok())
+    fn bits(value: &serde_json::Value, name: &str) -> Vec<u8> {
+        value[name]
+            .as_array()
+            .unwrap_or_else(|| panic!("reference field {name} must be an array"))
+            .iter()
+            .map(|value| {
+                u8::try_from(
+                    value
+                        .as_u64()
+                        .unwrap_or_else(|| panic!("reference field {name} must contain integers")),
+                )
+                .unwrap_or_else(|_| panic!("reference field {name} contains a non-u8 value"))
+            })
             .collect()
     }
 
-    fn by_r(j: &str, r: usize) -> &str {
-        let k = format!("\"{r}\":");
-        let i = j.find("\"by_r\"").unwrap();
-        let start = j[i..].find(&k).unwrap() + i + k.len();
-        &j[start..]
+    fn by_r(j: &serde_json::Value, r: usize) -> &serde_json::Value {
+        &j["by_r"][r.to_string()]
     }
 
-    fn gate<const R: usize>(j: &str, r: usize) {
+    fn gate<const R: usize>(j: &serde_json::Value, r: usize) {
         let obj = by_r(j, r);
-        let n = num(&j[j.find("\"build_n\"").unwrap()..], "build_n") as usize;
+        let n = num(j, "build_n") as usize;
         let bk = keys(n, 0xA11CE);
         let soln = build_std128::<R>(&bk).expect("solves");
         assert_eq!(

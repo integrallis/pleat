@@ -1,8 +1,9 @@
 //! Slot-range parallel banding (feature `parallel`).
 //!
 //! Threads own disjoint, window-aligned ranges of the banding matrix and band only the keys
-//! whose Gaussian reduction provably stays inside their range; keys starting within a safety
-//! margin `G` of a range boundary are deferred to a short sequential tail. Because banding is
+//! whose Gaussian reduction is expected to stay inside their range; keys starting within a safety
+//! margin `G` of a range boundary are deferred to a short sequential tail, and unexpected spills
+//! are detected and handled safely. Because banding is
 //! order-independent, the result is bit-identical to the sequential build — verified by the
 //! same fingerprint gate. No `unsafe`: the matrix is split into non-overlapping mutable slices
 //! with `split_at_mut`.
@@ -12,7 +13,7 @@ use crate::hash::{coeff_row, ribbon_hash, start};
 use std::thread;
 
 /// Boundary safety margin in slots. A key whose start is within `G` of its range's upper slot
-/// boundary is deferred, guaranteeing non-deferred reductions never cross into the next range.
+/// boundary is deferred; the spill path handles the rare reduction that crosses anyway.
 const G: usize = 1 << 14;
 
 pub fn from_keys_parallel_seeded<const R: usize>(
@@ -31,25 +32,28 @@ pub fn from_keys_parallel_seeded<const R: usize>(
         return band.solve();
     }
 
-    let window = 1usize << window_shift;
+    let window = crate::filter::window_size(window_shift);
     // Range boundaries in slots, aligned to windows so the coeff-row matrix splits cleanly.
     let n_windows = num_slots.div_ceil(window);
     let per = n_windows.div_ceil(threads);
     let mut bounds: Vec<usize> = (0..=threads)
-        .map(|t| (t * per * window).min(num_slots))
+        .map(|t| t.saturating_mul(per).saturating_mul(window).min(num_slots))
         .collect();
     bounds.dedup();
     let nt = bounds.len() - 1;
 
     // Bucket keys by which thread-range their start falls in; collect boundary keys to defer.
-    let mut buckets: Vec<Vec<u64>> = vec![Vec::new(); nt];
-    let mut deferred: Vec<u64> = Vec::new();
+    let bucket_capacity = keys.len().div_ceil(nt);
+    let mut buckets: Vec<Vec<u64>> = (0..nt)
+        .map(|_| Vec::with_capacity(bucket_capacity))
+        .collect();
+    let mut deferred: Vec<u64> = Vec::with_capacity(keys.len() / 4);
     for &k in keys {
         let s = start(ribbon_hash(k, seed), num_starts) as usize;
         // Which range does slot s belong to?
         let t = bounds.partition_point(|&b| b <= s) - 1;
         let hi = bounds[t + 1];
-        if t + 1 < nt && s + G >= hi {
+        if t + 1 < nt && s.saturating_add(G) >= hi {
             deferred.push(k); // too close to the upper boundary — defer
         } else {
             buckets[t].push(k);
