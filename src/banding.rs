@@ -139,7 +139,35 @@ impl<const R: usize> Solution<R> {
 
     /// Reconstruct from serialized components (used by `Ribbon::from_bytes`).
     pub fn from_parts(num_starts: u64, raw_seed: u64, segments: Vec<u64>) -> Self {
-        Self { segments, num_starts, raw_seed }
+        Self {
+            segments,
+            num_starts,
+            raw_seed,
+        }
+    }
+
+    /// Batch membership query with software prefetch: computes all target segments and
+    /// prefetches them, then probes — hides memory latency for bulk lookups.
+    pub fn contains_batch(&self, keys: &[u64], out: &mut [bool]) {
+        assert_eq!(keys.len(), out.len());
+        const STRIDE: usize = 32;
+        for (kc, oc) in keys.chunks(STRIDE).zip(out.chunks_mut(STRIDE)) {
+            for &k in kc {
+                let s = start(ribbon_hash(k, self.raw_seed), self.num_starts) as usize;
+                let seg = (s / W) * R;
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    core::arch::x86_64::_mm_prefetch(
+                        self.segments.as_ptr().add(seg) as *const i8,
+                        core::arch::x86_64::_MM_HINT_T0,
+                    );
+                }
+                let _ = seg;
+            }
+            for (k, o) in kc.iter().zip(oc.iter_mut()) {
+                *o = self.contains(*k);
+            }
+        }
     }
 
     /// Membership query (InterleavedPrepareQuery + InterleavedFilterQuery, r=7 fixed columns,
@@ -226,7 +254,7 @@ mod tests {
     }
 
     /// Slice the JSON object for result-width `r` under `"by_r"`.
-    fn by_r<'a>(json: &'a str, r: usize) -> &'a str {
+    fn by_r(json: &str, r: usize) -> &str {
         let key = format!("\"{r}\":");
         let i = json.find("\"by_r\"").unwrap();
         let j = json[i..].find(&key).unwrap() + i + key.len();
@@ -280,7 +308,11 @@ mod tests {
         let soln = b.solve();
 
         for (i, &want) in vec_array(obj, "present").iter().enumerate() {
-            assert_eq!(soln.contains(bk[i * 37 % n]) as u8, want, "present r={r} i={i}");
+            assert_eq!(
+                soln.contains(bk[i * 37 % n]) as u8,
+                want,
+                "present r={r} i={i}"
+            );
         }
         let ak = keys(200, 0xD15EA5E);
         for (i, &want) in vec_array(obj, "absent").iter().enumerate() {
@@ -307,6 +339,10 @@ mod tests {
         // Guard on the banding invariant: cr always carries a set low bit at each step.
         let mut b = Banding::<7>::new(64 * 32, 0);
         assert!(b.add(12345));
-        assert!(b.coeff_rows.iter().filter(|&&c| c != 0).all(|&c| c & 1 == 1));
+        assert!(b
+            .coeff_rows
+            .iter()
+            .filter(|&&c| c != 0)
+            .all(|&c| c & 1 == 1));
     }
 }

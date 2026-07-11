@@ -11,7 +11,12 @@ fn mix64(mut z: u64) -> u64 {
 }
 fn keys(n: usize) -> Vec<u64> {
     let mut s = 0xA11CEu64;
-    (0..n).map(|_| { s = s.wrapping_add(0x9e37_79b9_7f4a_7c15); mix64(s) }).collect()
+    (0..n)
+        .map(|_| {
+            s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            mix64(s)
+        })
+        .collect()
 }
 
 fn bench(c: &mut Criterion) {

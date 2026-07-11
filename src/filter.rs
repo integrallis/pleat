@@ -90,6 +90,16 @@ impl<const R: usize> Ribbon<R> {
         self.soln.contains(crate::hash_key(item))
     }
 
+    /// Batch query with software prefetch (`out[i] = contains(keys[i])`), faster for bulk lookups.
+    pub fn contains_batch(&self, keys: &[u64], out: &mut [bool]) {
+        self.soln.contains_batch(keys, out);
+    }
+
+    /// Estimated false-positive rate for this configuration, ~2^-R.
+    pub fn false_positive_rate(&self) -> f64 {
+        2f64.powi(-(R as i32))
+    }
+
     /// Serialized solution size in bytes (the queryable payload; keys are not stored).
     pub fn size_bytes(&self) -> usize {
         self.soln.segments().len() * 8
@@ -201,7 +211,10 @@ mod tests {
         let f = RibbonFilter::from_keys_pleated(&k);
         assert!(k.iter().all(|&x| f.contains(x)), "false negative");
         let absent = keys(200_000, 0xD15EA5E);
-        let fp = absent.iter().filter(|&&x| f.contains(x ^ 0x5555_5555_5555_5555)).count();
+        let fp = absent
+            .iter()
+            .filter(|&&x| f.contains(x ^ 0x5555_5555_5555_5555))
+            .count();
         let fpr = fp as f64 / 200_000.0;
         assert!(fpr < 0.02, "FPR {fpr} too high"); // r=7 => ~0.78%
         assert!(f.bits_per_key(n) < 10.0);
@@ -223,9 +236,12 @@ mod prod_tests {
     #[test]
     fn tunable_fpr_scales_with_r() {
         use crate::filter::Ribbon;
-        let k: Vec<u64> = (0..200_000u64).map(|i| i.wrapping_mul(0x9e3779b97f4a7c15)).collect();
-        let absent: Vec<u64> =
-            (0..200_000u64).map(|i| i.wrapping_mul(0x9e3779b97f4a7c15) ^ 0x1).collect();
+        let k: Vec<u64> = (0..200_000u64)
+            .map(|i| i.wrapping_mul(0x9e3779b97f4a7c15))
+            .collect();
+        let absent: Vec<u64> = (0..200_000u64)
+            .map(|i| i.wrapping_mul(0x9e3779b97f4a7c15) ^ 0x1)
+            .collect();
         let fpr = |present: &dyn Fn(u64) -> bool| -> f64 {
             absent.iter().filter(|&&x| present(x)).count() as f64 / absent.len() as f64
         };
@@ -240,12 +256,17 @@ mod prod_tests {
 
     #[test]
     fn roundtrip_serialization_preserves_queries() {
-        let k: Vec<u64> = (0..100_000u64).map(|i| i.wrapping_mul(0x9e3779b97f4a7c15)).collect();
+        let k: Vec<u64> = (0..100_000u64)
+            .map(|i| i.wrapping_mul(0x9e3779b97f4a7c15))
+            .collect();
         let f = RibbonFilter::from_keys_pleated(&k);
         let bytes = f.to_bytes();
         let g = RibbonFilter::from_bytes(&bytes).expect("valid buffer");
         assert_eq!(f.size_bytes(), g.size_bytes());
-        assert!(k.iter().all(|&x| g.contains(x)), "false negative after roundtrip");
+        assert!(
+            k.iter().all(|&x| g.contains(x)),
+            "false negative after roundtrip"
+        );
         // A few absent keys must answer identically before/after.
         for x in [1u64, 3, 999_999_999, u64::MAX] {
             assert_eq!(f.contains(x), g.contains(x));
@@ -298,6 +319,16 @@ impl<const R: usize> StdRibbon<R> {
     pub fn contains_hashable<K: core::hash::Hash>(&self, item: &K) -> bool {
         self.soln.contains(crate::hash_key(item))
     }
+
+    /// Batch query with software prefetch, faster for bulk lookups.
+    pub fn contains_batch(&self, keys: &[u64], out: &mut [bool]) {
+        self.soln.contains_batch(keys, out);
+    }
+
+    /// Estimated false-positive rate for this configuration, ~2^-R.
+    pub fn false_positive_rate(&self) -> f64 {
+        2f64.powi(-(R as i32))
+    }
     pub fn size_bytes(&self) -> usize {
         self.soln.segments().len() * 16
     }
@@ -316,9 +347,15 @@ mod std128_tests {
 
     fn keys(n: usize) -> Vec<u64> {
         let mut s = 0xA11CEu64;
-        (0..n).map(|_| { s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = s; z=(z^(z>>30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z=(z^(z>>27)).wrapping_mul(0x94d0_49bb_1331_11eb); z^(z>>31) }).collect()
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^ (z >> 31)
+            })
+            .collect()
     }
 
     #[test]
@@ -332,7 +369,10 @@ mod std128_tests {
                 solution_fnv_128(p.soln.segments()),
                 "std128 pleated diverges from arrival at n={n}"
             );
-            assert!(k.iter().all(|&x| p.contains(x)), "std128 false negative n={n}");
+            assert!(
+                k.iter().all(|&x| p.contains(x)),
+                "std128 false negative n={n}"
+            );
         }
     }
 
@@ -348,7 +388,10 @@ mod std128_tests {
                 solution_fnv_128(p.soln.segments()),
                 "std128 parallel (t={t}) diverges"
             );
-            assert!(k.iter().all(|&x| p.contains(x)), "std128 parallel false negative t={t}");
+            assert!(
+                k.iter().all(|&x| p.contains(x)),
+                "std128 parallel false negative t={t}"
+            );
         }
     }
 
@@ -372,17 +415,47 @@ mod hashable_tests {
     fn hashable_string_and_struct_keys() {
         let words: Vec<String> = (0..50_000).map(|i| format!("item-{i}")).collect();
         let f = RibbonFilter::from_hashable(&words);
-        assert!(words.iter().all(|w| f.contains_hashable(w)), "false negative on strings");
+        assert!(
+            words.iter().all(|w| f.contains_hashable(w)),
+            "false negative on strings"
+        );
         // Absent items: overwhelmingly rejected.
-        let absent = (0..50_000).filter(|i| {
-            let w = format!("absent-{i}");
-            f.contains_hashable(&w)
-        }).count();
+        let absent = (0..50_000)
+            .filter(|i| {
+                let w = format!("absent-{i}");
+                f.contains_hashable(&w)
+            })
+            .count();
         assert!((absent as f64 / 50_000.0) < 0.02, "FPR too high on strings");
 
         // Tuple keys through StdRibbon.
         let pairs: Vec<(u32, u32)> = (0..20_000u32).map(|i| (i, i.wrapping_mul(7))).collect();
         let g = StdRibbon::<8>::from_hashable(&pairs).unwrap();
         assert!(pairs.iter().all(|p| g.contains_hashable(p)));
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    fn keys(n: usize) -> Vec<u64> {
+        (0..n as u64)
+            .map(|i| i.wrapping_mul(0x9e3779b97f4a7c15))
+            .collect()
+    }
+    #[test]
+    fn batch_query_matches_scalar() {
+        let k = keys(100_000);
+        let f = RibbonFilter::from_keys_pleated(&k);
+        let probes = keys(50_000);
+        let mut out = vec![false; probes.len()];
+        f.contains_batch(&probes, &mut out);
+        assert!(out.iter().zip(&probes).all(|(&o, &p)| o == f.contains(p)));
+        assert!((f.false_positive_rate() - 2f64.powi(-7)).abs() < 1e-12);
+
+        let g = StdRibbon::<8>::from_keys_pleated(&k).unwrap();
+        let mut out2 = vec![false; probes.len()];
+        g.contains_batch(&probes, &mut out2);
+        assert!(out2.iter().zip(&probes).all(|(&o, &p)| o == g.contains(p)));
     }
 }

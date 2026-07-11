@@ -7,6 +7,11 @@ space-optimal filters at close to Bloom-filter speed, and roughly twice as fast 
 arrival order at scale. An Integrallis project; companion to the paper *"Ribbon Catches Bloom:
 Pleated Construction at Bloom Speed."*
 
+Two filter families — homogeneous `RibbonFilter` (w=64) and standard `StdRibbon` (w=128, the
+RocksDB shape) — each with arrival / pleated / parallel construction (all bit-identical),
+tunable false-positive rate, arbitrary hashable keys, batch queries, and serialization. Every
+kernel component is differentially gated byte-for-byte against the reference C++ implementation.
+
 A ribbon filter answers approximate set membership — "is this key possibly in the set?" — in
 about 7.6 bits per key at a ~0.8% false-positive rate, well under a Bloom filter's memory for
 the same accuracy. The cost has always been construction: ribbon filters are built by solving a
@@ -33,6 +38,16 @@ Construction variants, all producing the **bit-identical** filter (banding is or
 RibbonFilter::from_keys(&keys);              // arrival order (reference default)
 RibbonFilter::from_keys_pleated(&keys);      // pleated: ~2x faster at scale
 RibbonFilter::from_keys_parallel(&keys, 8);  // slot-range parallel (feature "parallel")
+RibbonFilter::from_hashable(&["a", "b"]);    // any Hash type (strings, tuples, ...)
+```
+
+Query one key or a batch (batch prefetches for throughput):
+
+```rust
+f.contains(key);
+f.contains_hashable(&"some string");
+let mut out = vec![false; probes.len()];
+f.contains_batch(&probes, &mut out);
 ```
 
 Tune the false-positive rate with the result-width parameter `R` (~2^-R):

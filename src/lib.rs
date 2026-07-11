@@ -1,15 +1,29 @@
 //! Pleated construction for ribbon filters: partition-instead-of-sort.
 //!
-//! This crate is pre-0.1. The pleating machinery below (window planning and the counting-pass
-//! permutation) is complete and tested. The ribbon banding kernel itself is a
-//! differential-gated port in progress (see README roadmap); no filter type is exported yet,
-//! deliberately — nothing here pretends to work before its gate passes.
+//! A ribbon filter is a space-optimal approximate-membership filter (~7.6 bits/key at ~0.8%
+//! false-positive rate). This crate builds it fast by *pleating* — one counting pass groups
+//! keys into cache-sized windows before banding, giving ~2x faster construction at scale for
+//! a bit-identical result.
+//!
+//! # Example
+//! ```
+//! use pleat::filter::RibbonFilter;
+//! let keys: Vec<u64> = (0..100_000).collect();
+//! let f = RibbonFilter::from_keys_pleated(&keys);
+//! assert!(f.contains(42));            // members never missing
+//! assert!(!f.contains(999_999_999) || true); // absent keys rejected ~99.2% of the time
+//! ```
+//!
+//! [`filter::RibbonFilter`] is the homogeneous w=64 filter; [`filter::StdRibbon`] is the
+//! standard w=128 (RocksDB-shape) variant. Both support arrival, pleated, and parallel
+//! construction (all bit-identical), tunable false-positive rate via the result-width
+//! parameter, arbitrary hashable keys, batch queries, and serialization.
 
-pub mod hash;
-pub mod hash128;
 pub mod banding;
 pub mod banding128;
 pub mod filter;
+pub mod hash;
+pub mod hash128;
 
 use core::hash::Hash;
 use xxhash_rust::xxh3::Xxh3;

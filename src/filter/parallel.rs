@@ -121,7 +121,12 @@ mod tests {
     }
     fn keys(n: usize, seed: u64) -> Vec<u64> {
         let mut s = seed;
-        (0..n).map(|_| { s = s.wrapping_add(0x9e37_79b9_7f4a_7c15); mix64(s) }).collect()
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                mix64(s)
+            })
+            .collect()
     }
 
     #[test]
@@ -135,7 +140,10 @@ mod tests {
                 solution_fnv(par.segments()),
                 "parallel build (t={t}) diverges from sequential"
             );
-            assert!(k.iter().all(|&x| par.contains(x)), "parallel: false negative t={t}");
+            assert!(
+                k.iter().all(|&x| par.contains(x)),
+                "parallel: false negative t={t}"
+            );
         }
     }
 

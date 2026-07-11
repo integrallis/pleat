@@ -10,7 +10,7 @@ pub use crate::hash::{ribbon_hash, start};
 
 const K_COEFF_AND_RESULT_FACTOR: u64 = 0xc28f_8282_2b65_0bed; // ribbon_impl.h:383
 const K_COEFF_XOR64: u64 = 0xc367_844a_6e52_731d; // ribbon_impl.h:389
-// Ordinal <-> raw seed mixing (ribbon_impl.h:392-397).
+                                                  // Ordinal <-> raw seed mixing (ribbon_impl.h:392-397).
 const K_SEED_MIX_MASK: u64 = 0xf0f0_f0f0_f0f0_f0f0;
 const K_SEED_MIX_SHIFT: u32 = 4;
 const K_TO_RAW_SEED_FACTOR: u64 = 0xc782_19a2_3eea_dd03;
@@ -57,7 +57,9 @@ mod tests {
         let pat = format!("\"{name}\":");
         let i = json.find(&pat).unwrap() + pat.len();
         let rest = json[i..].trim_start();
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
         rest[..end].parse().unwrap()
     }
 
@@ -75,11 +77,27 @@ mod tests {
             let key = num(&obj, "key");
             let h = ribbon_hash(key, 0);
             assert_eq!(h, num(&obj, "hash"), "hash mismatch key {key}");
-            assert_eq!(start(h, num_starts), num(&obj, "start"), "start mismatch key {key}");
+            assert_eq!(
+                start(h, num_starts),
+                num(&obj, "start"),
+                "start mismatch key {key}"
+            );
             let cr = coeff_row_128(h);
-            assert_eq!((cr >> 64) as u64, num(&obj, "coeff_hi"), "coeff_hi mismatch key {key}");
-            assert_eq!(cr as u64, num(&obj, "coeff_lo"), "coeff_lo mismatch key {key}");
-            assert_eq!(result_row(h) as u64, num(&obj, "result"), "result mismatch key {key}");
+            assert_eq!(
+                (cr >> 64) as u64,
+                num(&obj, "coeff_hi"),
+                "coeff_hi mismatch key {key}"
+            );
+            assert_eq!(
+                cr as u64,
+                num(&obj, "coeff_lo"),
+                "coeff_lo mismatch key {key}"
+            );
+            assert_eq!(
+                result_row(h) as u64,
+                num(&obj, "result"),
+                "result mismatch key {key}"
+            );
             n += 1;
         }
         assert!(n >= 1000, "expected >=1000 vectors, got {n}");
@@ -89,6 +107,10 @@ mod tests {
     fn seed_mapping_is_injective_and_zero_fixed() {
         assert_eq!(ordinal_to_raw_seed(0), 0);
         let seeds: std::collections::HashSet<u32> = (0..64).map(ordinal_to_raw_seed).collect();
-        assert_eq!(seeds.len(), 64, "ordinal->raw seed must be injective over 0..64");
+        assert_eq!(
+            seeds.len(),
+            64,
+            "ordinal->raw seed must be injective over 0..64"
+        );
     }
 }

@@ -55,7 +55,12 @@ mod tests {
         for e in &v.hash_vectors {
             let h = ribbon_hash(e.key, v.raw_seed);
             assert_eq!(h, e.hash, "hash mismatch for key {}", e.key);
-            assert_eq!(start(h, v.num_starts), e.start, "start mismatch for key {}", e.key);
+            assert_eq!(
+                start(h, v.num_starts),
+                e.start,
+                "start mismatch for key {}",
+                e.key
+            );
             assert_eq!(coeff_row(h), e.coeff, "coeff mismatch for key {}", e.key);
         }
         assert!(!v.hash_vectors.is_empty());
@@ -86,7 +91,9 @@ mod tests {
             let pat = format!("\"{name}\":");
             let i = obj.find(&pat)? + pat.len();
             let rest = obj[i..].trim_start();
-            let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
             rest[..end].parse().ok()
         }
         pub fn parse(s: &str) -> Vectors {
@@ -103,7 +110,11 @@ mod tests {
                     coeff: field(&obj, "coeff").unwrap(),
                 });
             }
-            Vectors { raw_seed, num_starts, hash_vectors }
+            Vectors {
+                raw_seed,
+                num_starts,
+                hash_vectors,
+            }
         }
     }
 }

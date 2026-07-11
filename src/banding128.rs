@@ -153,6 +153,29 @@ impl<const R: usize> Solution128<R> {
         self.ordinal_seed
     }
 
+    /// Batch membership query with software prefetch (see `Solution::contains_batch`).
+    pub fn contains_batch(&self, keys: &[u64], out: &mut [bool]) {
+        assert_eq!(keys.len(), out.len());
+        const STRIDE: usize = 32;
+        for (kc, oc) in keys.chunks(STRIDE).zip(out.chunks_mut(STRIDE)) {
+            for &k in kc {
+                let s = start(ribbon_hash(k, self.raw_seed as u64), self.num_starts) as usize;
+                let seg = (s / W128) * R;
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    core::arch::x86_64::_mm_prefetch(
+                        self.segments.as_ptr().add(seg) as *const i8,
+                        core::arch::x86_64::_MM_HINT_T0,
+                    );
+                }
+                let _ = seg;
+            }
+            for (k, o) in kc.iter().zip(oc.iter_mut()) {
+                *o = self.contains(*k);
+            }
+        }
+    }
+
     /// Membership query (InterleavedFilterQuery, w=128). Present iff every column parity
     /// matches the corresponding bit of the key's expected result row.
     pub fn contains(&self, key: u64) -> bool {
@@ -166,7 +189,8 @@ impl<const R: usize> Solution128<R> {
         let cr_right = cr >> ((W128 - start_bit) % W128);
         let maybe = if start_bit != 0 { R } else { 0 };
         for i in 0..R {
-            let soln = (self.segments[seg + i] & cr_left) | (self.segments[seg + maybe + i] & cr_right);
+            let soln =
+                (self.segments[seg + i] & cr_left) | (self.segments[seg + maybe + i] & cr_right);
             if (soln.count_ones() & 1) != ((expected >> i) & 1) {
                 return false;
             }
@@ -234,7 +258,9 @@ pub fn build_std128_parallel<const R: usize>(
         let raw = b.raw_seed as u64;
         // Thread range bounds, window-aligned at ~equal key counts is overkill; even windows.
         let per = n_windows.div_ceil(threads);
-        let mut bounds: Vec<usize> = (0..=threads).map(|t| (t * per * window).min(num_slots)).collect();
+        let mut bounds: Vec<usize> = (0..=threads)
+            .map(|t| (t * per * window).min(num_slots))
+            .collect();
         bounds.dedup();
         let nt = bounds.len() - 1;
 
@@ -388,7 +414,12 @@ mod tests {
     }
     fn keys(n: usize, seed: u64) -> Vec<u64> {
         let mut s = seed;
-        (0..n).map(|_| { s = s.wrapping_add(0x9e37_79b9_7f4a_7c15); mix64(s) }).collect()
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                mix64(s)
+            })
+            .collect()
     }
     fn load() -> String {
         std::fs::read_to_string(
@@ -401,14 +432,21 @@ mod tests {
         let i = j.find(&p).unwrap() + p.len();
         let r = j[i..].trim_start().trim_start_matches('"');
         let e = r.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(r.len());
-        if name == "soln_fnv" { u64::from_str_radix(&r[..e], 16).unwrap() } else { r[..e].parse().unwrap() }
+        if name == "soln_fnv" {
+            u64::from_str_radix(&r[..e], 16).unwrap()
+        } else {
+            r[..e].parse().unwrap()
+        }
     }
     fn bits(j: &str, name: &str) -> Vec<u8> {
         let p = format!("\"{name}\":");
         let i = j.find(&p).unwrap() + p.len();
         let r = &j[i..];
         let (a, b) = (r.find('[').unwrap(), r.find(']').unwrap());
-        r[a + 1..b].split(',').filter_map(|t| t.trim().parse().ok()).collect()
+        r[a + 1..b]
+            .split(',')
+            .filter_map(|t| t.trim().parse().ok())
+            .collect()
     }
 
     fn by_r(j: &str, r: usize) -> &str {
@@ -423,14 +461,30 @@ mod tests {
         let n = num(&j[j.find("\"build_n\"").unwrap()..], "build_n") as usize;
         let bk = keys(n, 0xA11CE);
         let soln = build_std128::<R>(&bk).expect("solves");
-        assert_eq!(soln.ordinal_seed() as u64, num(obj, "chosen_ordinal_seed"), "seed r={r}");
-        assert_eq!(solution_fnv_128(soln.segments()), num(obj, "soln_fnv"), "fingerprint r={r}");
+        assert_eq!(
+            soln.ordinal_seed() as u64,
+            num(obj, "chosen_ordinal_seed"),
+            "seed r={r}"
+        );
+        assert_eq!(
+            solution_fnv_128(soln.segments()),
+            num(obj, "soln_fnv"),
+            "fingerprint r={r}"
+        );
         for (i, &want) in bits(obj, "present").iter().enumerate() {
-            assert_eq!(soln.contains(bk[i * 37 % n]) as u8, want, "present r={r} i={i}");
+            assert_eq!(
+                soln.contains(bk[i * 37 % n]) as u8,
+                want,
+                "present r={r} i={i}"
+            );
         }
         let ak = keys(200, 0xD15EA5E);
         for (i, &want) in bits(obj, "absent").iter().enumerate() {
-            assert_eq!(soln.contains(ak[i] ^ 0x5555_5555_5555_5555) as u8, want, "absent r={r} i={i}");
+            assert_eq!(
+                soln.contains(ak[i] ^ 0x5555_5555_5555_5555) as u8,
+                want,
+                "absent r={r} i={i}"
+            );
         }
         assert!(bk.iter().all(|&k| soln.contains(k)), "false negative r={r}");
     }
