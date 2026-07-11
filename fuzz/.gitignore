@@ -1,0 +1,2 @@
+fuzz/target/
+fuzz/Cargo.lock
