@@ -21,7 +21,7 @@ default = ["parallel"]
 parallel = []  # slot-range parallel construction (uses std::thread; no extra deps)
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 serde_json = "1"
 
 [package.metadata.docs.rs]
