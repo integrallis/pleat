@@ -240,3 +240,80 @@ mod prod_tests {
         assert!(RibbonFilter::from_bytes(&[0u8; 5]).is_none());
     }
 }
+
+// ---- Standard ribbon (w=128), the RocksDB production shape ----
+
+use crate::banding128::{
+    build_std128, build_std128_pleated, solution_from_bytes, solution_to_bytes, Solution128,
+};
+
+/// A **standard** (non-homogeneous) ribbon filter at w=128 with `R` result bits — the shape
+/// RocksDB ships. Slightly tighter space than homogeneous ribbon for the same FPR, at the cost
+/// of a construction seed-retry loop. Construction returns `None` only if no seed in 0..64
+/// solves (not observed at the standard load factor).
+pub struct StdRibbon<const R: usize> {
+    soln: Solution128<R>,
+}
+
+impl<const R: usize> StdRibbon<R> {
+    /// Build in arrival order.
+    pub fn from_keys(keys: &[u64]) -> Option<Self> {
+        build_std128::<R>(keys).map(|soln| Self { soln })
+    }
+    /// Build with pleated construction (bit-identical to [`StdRibbon::from_keys`], faster at scale).
+    pub fn from_keys_pleated(keys: &[u64]) -> Option<Self> {
+        build_std128_pleated::<R>(keys, DEFAULT_WINDOW_SHIFT).map(|soln| Self { soln })
+    }
+    #[inline]
+    pub fn contains(&self, key: u64) -> bool {
+        self.soln.contains(key)
+    }
+    pub fn size_bytes(&self) -> usize {
+        self.soln.segments().len() * 16
+    }
+    pub fn to_bytes(&self) -> Vec<u8> {
+        solution_to_bytes(&self.soln)
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        solution_from_bytes::<R>(bytes).map(|soln| Self { soln })
+    }
+}
+
+#[cfg(test)]
+mod std128_tests {
+    use super::*;
+    use crate::banding128::solution_fnv_128;
+
+    fn keys(n: usize) -> Vec<u64> {
+        let mut s = 0xA11CEu64;
+        (0..n).map(|_| { s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = s; z=(z^(z>>30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z=(z^(z>>27)).wrapping_mul(0x94d0_49bb_1331_11eb); z^(z>>31) }).collect()
+    }
+
+    #[test]
+    fn std128_pleated_is_bit_identical_to_arrival() {
+        for n in [5000usize, 100_000, 300_000] {
+            let k = keys(n);
+            let a = StdRibbon::<7>::from_keys(&k).unwrap();
+            let p = StdRibbon::<7>::from_keys_pleated(&k).unwrap();
+            assert_eq!(
+                solution_fnv_128(a.soln.segments()),
+                solution_fnv_128(p.soln.segments()),
+                "std128 pleated diverges from arrival at n={n}"
+            );
+            assert!(k.iter().all(|&x| p.contains(x)), "std128 false negative n={n}");
+        }
+    }
+
+    #[test]
+    fn std128_serialization_roundtrip() {
+        let k = keys(100_000);
+        let f = StdRibbon::<8>::from_keys_pleated(&k).unwrap();
+        let g = StdRibbon::<8>::from_bytes(&f.to_bytes()).unwrap();
+        assert!(k.iter().all(|&x| g.contains(x)));
+        for x in [1u64, 7, 999, u64::MAX] {
+            assert_eq!(f.contains(x), g.contains(x));
+        }
+    }
+}

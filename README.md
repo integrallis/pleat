@@ -79,7 +79,17 @@ This release implements **homogeneous ribbon** at w=64 with a tunable result wid
 the false-positive rate is ~2^-R and the size is ~1.09·R bits per key, so R=7 gives ~0.8% FPR
 at ~7.6 bits/key — the variant used as the reference benchmark — and R=10 gives ~0.1% at
 ~10.9 bits/key. Gated against reference vectors for R in {5, 7, 8, 10}. Keys are 64-bit; hash
-your keys to `u64` first. Standard ribbon (w=128) is planned.
+your keys to `u64` first.
+
+**Standard ribbon (w=128)** — the RocksDB production shape — is also available via `StdRibbon`,
+with the same pleated and arrival construction (bit-identical, seed-retry included) and slightly
+tighter space:
+
+```rust
+use pleat::filter::StdRibbon;
+let f = StdRibbon::<8>::from_keys_pleated(&keys).expect("solves");  // ~0.4% FPR
+assert!(f.contains(keys[0]));
+```
 
 ## Reproduce
 

@@ -78,6 +78,26 @@ impl<const R: usize> Banding128<R> {
         None
     }
 
+    /// As [`find_seed`], but pleats the keys into start-windows (for that seed) before banding.
+    /// Because banding — and the solvability that picks the seed — is order-independent, this
+    /// lands on the same seed and the same solution as [`find_seed`], faster at scale.
+    fn find_seed_pleated(num_slots: usize, keys: &[u64], window_shift: u32) -> Option<Self> {
+        let mut b = Self::new(num_slots);
+        let num_starts = b.num_starts;
+        let mut scratch: Vec<u64> = vec![0; keys.len()];
+        for ordinal in 0..SEED_COUNT {
+            b.reset(ordinal);
+            let raw = b.raw_seed as u64;
+            let plan = crate::PleatPlan::new(num_starts, window_shift);
+            let (ordered, _) = plan.pleat(keys, |k| start(ribbon_hash(k, raw), num_starts));
+            scratch.copy_from_slice(&ordered);
+            if scratch.iter().all(|&k| b.add(k)) {
+                return Some(b);
+            }
+        }
+        None
+    }
+
     /// Interleaved back-substitution into `num_blocks * R` little-endian u128 segments. Uses
     /// stored result rows (0 for empty slots — non-homogeneous LoadRow).
     fn back_substitute(&self) -> Vec<u128> {
@@ -165,11 +185,51 @@ pub fn num_slots_for_128(n: usize, r: usize) -> usize {
     s.max(2 * W128)
 }
 
-/// Build a w=128 standard ribbon filter, finding a solving seed. Returns `None` only if no seed
-/// in 0..64 solves (not observed at the standard load factor).
+/// Build a w=128 standard ribbon filter in arrival order, finding a solving seed. Returns
+/// `None` only if no seed in 0..64 solves (not observed at the standard load factor).
 pub fn build_std128<const R: usize>(keys: &[u64]) -> Option<Solution128<R>> {
     let num_slots = num_slots_for_128(keys.len(), R);
     Banding128::<R>::find_seed(num_slots, keys).map(Banding128::into_solution)
+}
+
+/// Build a w=128 standard ribbon filter with pleated construction. Bit-identical to
+/// [`build_std128`] (same seed, same solution), faster at scale.
+pub fn build_std128_pleated<const R: usize>(
+    keys: &[u64],
+    window_shift: u32,
+) -> Option<Solution128<R>> {
+    let num_slots = num_slots_for_128(keys.len(), R);
+    Banding128::<R>::find_seed_pleated(num_slots, keys, window_shift).map(Banding128::into_solution)
+}
+
+/// Serialize a solution: `[ordinal_seed u32][num_starts u64]` then the u128 segments (LE).
+pub fn solution_to_bytes<const R: usize>(s: &Solution128<R>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + s.segments.len() * 16);
+    out.extend_from_slice(&s.ordinal_seed.to_le_bytes());
+    out.extend_from_slice(&s.num_starts.to_le_bytes());
+    for &seg in &s.segments {
+        out.extend_from_slice(&seg.to_le_bytes());
+    }
+    out
+}
+
+/// Reconstruct a solution from [`solution_to_bytes`].
+pub fn solution_from_bytes<const R: usize>(bytes: &[u8]) -> Option<Solution128<R>> {
+    if bytes.len() < 12 || !(bytes.len() - 12).is_multiple_of(16) {
+        return None;
+    }
+    let ordinal_seed = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let num_starts = u64::from_le_bytes(bytes[4..12].try_into().ok()?);
+    let segments = bytes[12..]
+        .chunks_exact(16)
+        .map(|c| u128::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    Some(Solution128 {
+        segments,
+        num_starts,
+        raw_seed: ordinal_to_raw_seed(ordinal_seed),
+        ordinal_seed,
+    })
 }
 
 /// FNV-1a over the little-endian bytes of the u128 segments (matches the reference serialized
