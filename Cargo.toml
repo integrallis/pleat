@@ -25,3 +25,11 @@ criterion = "0.5"
 [[bench]]
 name = "construct"
 harness = false
+
+[[bench]]
+name = "query"
+harness = false
+
+[[bench]]
+name = "serde"
+harness = false

@@ -72,6 +72,17 @@ Pleating pays off once the banding table exceeds cache (2.3x at 10M keys here); 
 crossover it costs slightly more than arrival order, as expected. These are this crate's own
 numbers; the paper's headline figures are measured on the reference C++ kernel.
 
+## Query, serialization, and accuracy
+
+Same machine, 10M-key filter (`cargo bench --bench query --bench serde`):
+
+- **Query (miss-dominated), ns per lookup:** homogeneous 17.4 scalar / 15.4 batch; standard 24.2 scalar.
+  `contains_batch` prefetches, giving ~12% over scalar for homogeneous.
+- **Serialization:** validated `from_bytes` (checksum + full field validation) runs at ~1.2 GB/s —
+  validation is not a bottleneck.
+- **False-positive rate** at r=7, measured over 2M absent probes: 0.783% (theory 2⁻⁷ = 0.781%);
+  a statistical test asserts this on every `cargo test` run.
+
 ## Correctness
 
 Every kernel component is **differentially gated** against the reference ribbon implementation

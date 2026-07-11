@@ -613,3 +613,51 @@ mod soundness_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod fpr_stat_tests {
+    use super::*;
+
+    fn keys(n: usize, seed: u64) -> Vec<u64> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^ (z >> 31)
+            })
+            .collect()
+    }
+
+    // With 2M independent absent probes at true p = 2^-r, the observed rate is within a few
+    // percent of p with overwhelming probability (std/p ≈ 1/sqrt(p·N) ≈ 0.8% relative for r=7),
+    // so a ±15% band is ~19 sigma — a real statistical check, not a tautology.
+    fn assert_fpr_near<F: Fn(u64) -> bool>(present: F, r: u32) {
+        let probes = keys(2_000_000, 0xD15EA5E);
+        let fp = probes
+            .iter()
+            .filter(|&&k| present(k ^ 0x5555_5555_5555_5555))
+            .count();
+        let measured = fp as f64 / probes.len() as f64;
+        let expected = 2f64.powi(-(r as i32));
+        let rel = (measured - expected).abs() / expected;
+        assert!(
+            rel < 0.15,
+            "r={r}: measured FPR {measured:.5} deviates {:.1}% from 2^-r {expected:.5}",
+            rel * 100.0
+        );
+    }
+
+    #[test]
+    fn fpr_matches_two_to_minus_r_statistically() {
+        let k = keys(500_000, 0xA11CE);
+        let f7 = Ribbon::<7>::from_keys_pleated(&k);
+        assert_fpr_near(|x| f7.contains(x), 7);
+        let f10 = Ribbon::<10>::from_keys_pleated(&k);
+        assert_fpr_near(|x| f10.contains(x), 10);
+        let s7 = StdRibbon::<7>::from_keys_pleated(&k).unwrap();
+        assert_fpr_near(|x| s7.contains(x), 7);
+    }
+}

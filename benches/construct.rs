@@ -2,7 +2,7 @@
 //! arrival, pleated, and parallel builds. Cross-validates that the Rust crate delivers the
 //! technique's benefit (the differential gate already proved it computes the same filter).
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use pleat::filter::RibbonFilter;
+use pleat::filter::{RibbonFilter, StdRibbon};
 
 fn mix64(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -32,11 +32,23 @@ fn bench(c: &mut Criterion) {
             b.iter(|| RibbonFilter::from_keys_pleated(std::hint::black_box(&k)))
         });
         #[cfg(feature = "parallel")]
-        for t in [4usize, 8] {
-            g.bench_function(BenchmarkId::from_parameter(format!("parallel_{t}t")), |b| {
-                b.iter(|| RibbonFilter::from_keys_parallel(std::hint::black_box(&k), t))
-            });
+        for t in [2usize, 4, 8] {
+            g.bench_function(
+                BenchmarkId::from_parameter(format!("homog_parallel_{t}t")),
+                |b| b.iter(|| RibbonFilter::from_keys_parallel(std::hint::black_box(&k), t)),
+            );
         }
+        // Standard (w=128, RocksDB shape): arrival, pleated, parallel.
+        g.bench_function(BenchmarkId::from_parameter("std_arrival"), |b| {
+            b.iter(|| StdRibbon::<7>::from_keys(std::hint::black_box(&k)).unwrap())
+        });
+        g.bench_function(BenchmarkId::from_parameter("std_pleated"), |b| {
+            b.iter(|| StdRibbon::<7>::from_keys_pleated(std::hint::black_box(&k)).unwrap())
+        });
+        #[cfg(feature = "parallel")]
+        g.bench_function(BenchmarkId::from_parameter("std_parallel_8t"), |b| {
+            b.iter(|| StdRibbon::<7>::from_keys_parallel(std::hint::black_box(&k), 8).unwrap())
+        });
         g.finish();
     }
 }
