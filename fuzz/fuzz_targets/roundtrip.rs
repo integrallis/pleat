@@ -16,7 +16,7 @@ fuzz_target!(|keys: Vec<u64>| {
     }
     assert_eq!(f.to_bytes(), g.to_bytes(), "round-trip not byte-stable");
 
-    if let Some(s) = StdRibbon::<7>::from_keys_pleated(&keys) {
+    if let Ok(s) = StdRibbon::<7>::from_keys_pleated(&keys) {
         let sb = s.to_bytes();
         let s2 = StdRibbon::<7>::from_bytes(&sb).expect("std buffer must round-trip");
         for &k in &keys {
