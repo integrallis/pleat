@@ -44,83 +44,55 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// Minimal JSON pull for the fields we need (avoids a serde dep in the test).
-    fn load_vectors() -> serde_lite::Vectors {
-        serde_lite::parse(
-            &std::fs::read_to_string(
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/homog_w64_r7.json"),
-            )
-            .expect("vectors present"),
+    fn load_vectors() -> serde_json::Value {
+        let text = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/homog_w64_r7.json"),
         )
+        .expect("vectors present");
+        serde_json::from_str(&text).expect("reference vectors must be valid JSON")
+    }
+
+    fn field(value: &serde_json::Value, name: &str) -> u64 {
+        value[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("missing or non-u64 reference field {name}"))
     }
 
     #[test]
     fn hash_start_coeff_match_reference_exactly() {
         let v = load_vectors();
-        assert_eq!(v.raw_seed, 0);
-        for e in &v.hash_vectors {
-            let h = ribbon_hash(e.key, v.raw_seed);
-            assert_eq!(h, e.hash, "hash mismatch for key {}", e.key);
+        let raw_seed = field(&v["config"], "raw_seed");
+        assert_eq!(raw_seed, 0);
+        let vectors = v["hash_vectors"]
+            .as_array()
+            .expect("hash_vectors must be an array");
+        let num_starts = field(&vectors[0], "_num_starts_for_start_field");
+        for e in &vectors[1..] {
+            let key = field(e, "key");
+            let h = ribbon_hash(key, raw_seed);
+            assert_eq!(h, field(e, "hash"), "hash mismatch for key {key}");
             assert_eq!(
-                start(h, v.num_starts),
-                e.start,
-                "start mismatch for key {}",
-                e.key
+                start(h, num_starts),
+                field(e, "start"),
+                "start mismatch for key {key}"
             );
-            assert_eq!(coeff_row(h), e.coeff, "coeff mismatch for key {}", e.key);
+            assert_eq!(
+                coeff_row(h),
+                field(e, "coeff"),
+                "coeff mismatch for key {key}"
+            );
         }
-        assert!(!v.hash_vectors.is_empty());
+        assert!(vectors.len() >= 1001);
     }
 
     #[test]
     fn coeff_first_bit_always_one() {
-        for e in &load_vectors().hash_vectors {
-            assert_eq!(coeff_row(e.hash) & 1, 1);
-        }
-    }
-
-    // Tiny hand-rolled parser for exactly this vector file — no external JSON crate needed
-    // in the port's early stages. Replaced by serde if the crate later takes a serde dep.
-    mod serde_lite {
-        pub struct Entry {
-            pub key: u64,
-            pub hash: u64,
-            pub start: u64,
-            pub coeff: u64,
-        }
-        pub struct Vectors {
-            pub raw_seed: u64,
-            pub num_starts: u64,
-            pub hash_vectors: Vec<Entry>,
-        }
-        fn field(obj: &str, name: &str) -> Option<u64> {
-            let pat = format!("\"{name}\":");
-            let i = obj.find(&pat)? + pat.len();
-            let rest = obj[i..].trim_start();
-            let end = rest
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len());
-            rest[..end].parse().ok()
-        }
-        pub fn parse(s: &str) -> Vectors {
-            let raw_seed = field(s, "raw_seed").unwrap();
-            let num_starts = field(s, "_num_starts_for_start_field").unwrap();
-            let mut hash_vectors = Vec::new();
-            // Each key entry is an object containing "key":
-            for chunk in s.split("{\"key\":").skip(1) {
-                let obj = format!("{{\"key\":{chunk}");
-                hash_vectors.push(Entry {
-                    key: field(&obj, "key").unwrap(),
-                    hash: field(&obj, "hash").unwrap(),
-                    start: field(&obj, "start").unwrap(),
-                    coeff: field(&obj, "coeff").unwrap(),
-                });
-            }
-            Vectors {
-                raw_seed,
-                num_starts,
-                hash_vectors,
-            }
+        let v = load_vectors();
+        let vectors = v["hash_vectors"]
+            .as_array()
+            .expect("hash_vectors must be an array");
+        for e in &vectors[1..] {
+            assert_eq!(coeff_row(field(e, "hash")) & 1, 1);
         }
     }
 }

@@ -53,60 +53,53 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn load() -> String {
-        std::fs::read_to_string(
+    fn load() -> serde_json::Value {
+        let text = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/std_w128_r7.json"),
         )
-        .unwrap()
+        .expect("reference vectors must be present");
+        serde_json::from_str(&text).expect("reference vectors must be valid JSON")
     }
-    fn num(json: &str, name: &str) -> u64 {
-        let pat = format!("\"{name}\":");
-        let i = json.find(&pat).unwrap() + pat.len();
-        let rest = json[i..].trim_start();
-        let end = rest
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(rest.len());
-        rest[..end].parse().unwrap()
+    fn num(value: &serde_json::Value, name: &str) -> u64 {
+        value[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("missing or non-u64 reference field {name}"))
     }
 
     #[test]
     fn w128_hash_coeff_result_seed_match_reference() {
         let j = load();
         let num_starts = num(&j, "num_starts_seed0");
-        // Iterate hash_vectors objects (each begins with "key":).
-        let mut n = 0;
-        for chunk in j.split("{\"key\":").skip(1) {
-            let obj = format!("{{\"key\":{chunk}");
-            if !obj.contains("\"coeff_hi\":") {
-                continue;
-            }
-            let key = num(&obj, "key");
+        let vectors = j["hash_vectors"]
+            .as_array()
+            .expect("hash_vectors must be an array");
+        for obj in vectors {
+            let key = num(obj, "key");
             let h = ribbon_hash(key, 0);
-            assert_eq!(h, num(&obj, "hash"), "hash mismatch key {key}");
+            assert_eq!(h, num(obj, "hash"), "hash mismatch key {key}");
             assert_eq!(
                 start(h, num_starts),
-                num(&obj, "start"),
+                num(obj, "start"),
                 "start mismatch key {key}"
             );
             let cr = coeff_row_128(h);
             assert_eq!(
                 (cr >> 64) as u64,
-                num(&obj, "coeff_hi"),
+                num(obj, "coeff_hi"),
                 "coeff_hi mismatch key {key}"
             );
             assert_eq!(
                 cr as u64,
-                num(&obj, "coeff_lo"),
+                num(obj, "coeff_lo"),
                 "coeff_lo mismatch key {key}"
             );
             assert_eq!(
                 result_row(h) as u64,
-                num(&obj, "result"),
+                num(obj, "result"),
                 "result mismatch key {key}"
             );
-            n += 1;
         }
-        assert!(n >= 1000, "expected >=1000 vectors, got {n}");
+        assert!(vectors.len() >= 1000, "expected >=1000 vectors");
     }
 
     #[test]
