@@ -8,6 +8,7 @@
 pub mod hash;
 pub mod hash128;
 pub mod banding;
+pub mod banding128;
 pub mod filter;
 /// A pleating plan: how a key stream is folded into table-window order.
 ///
