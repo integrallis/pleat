@@ -1,0 +1,53 @@
+name: Publish
+
+# Manual, on-demand publish to crates.io. Nothing publishes automatically — a maintainer
+# triggers this from the Actions tab (Run workflow) after review. Uses the CARGO_REGISTRY_TOKEN
+# repository secret. The full quality gate (fmt, clippy, tests incl. the differential gate, doc)
+# must pass before `cargo publish` runs, so a broken build can never ship.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run only (cargo publish --dry-run), do not actually publish"
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+      - name: Tests (includes the reference differential gate)
+        run: cargo test --all-features
+
+      - name: Docs (deny warnings)
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Package check
+        run: cargo package --all-features
+
+      - name: Publish (dry run)
+        if: ${{ inputs.dry_run }}
+        run: cargo publish --all-features --dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish to crates.io
+        if: ${{ !inputs.dry_run }}
+        run: cargo publish --all-features
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
