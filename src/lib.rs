@@ -6,6 +6,7 @@
 //! deliberately — nothing here pretends to work before its gate passes.
 
 pub mod hash;
+pub mod hash128;
 pub mod banding;
 pub mod filter;
 /// A pleating plan: how a key stream is folded into table-window order.
