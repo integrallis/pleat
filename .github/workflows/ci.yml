@@ -50,6 +50,8 @@ jobs:
         with:
           toolchain: stable
           targets: i686-unknown-linux-musl
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Test 32-bit decode and query paths
         run: cargo test --target i686-unknown-linux-musl --all-features --locked
         env:
