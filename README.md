@@ -41,6 +41,10 @@ RibbonFilter::from_keys_parallel(&keys, 8);  // slot-range parallel (feature "pa
 RibbonFilter::from_hashable(&["a", "b"]);    // any Hash type (strings, tuples, ...)
 ```
 
+The `*_hashable` helpers use Rust's `Hash` trait and are intended for values produced and
+consumed by the same crate/toolchain. For durable or cross-language filters, define a stable
+application encoding and hash it to `u64`, then use the `from_keys`/`contains` APIs.
+
 Query one key or a batch (batch prefetches for throughput):
 
 ```rust
@@ -93,7 +97,7 @@ query outcomes — and the Rust tests assert byte-exact agreement:
 - hashing reproduces the reference per-key values on 1000 vectors;
 - banding + back-substitution reproduce the reference's serialized solution byte-for-byte;
 - queries reproduce the reference's present/absent outcomes;
-- pleated and parallel builds are proven bit-identical to the sequential build.
+- pleated and parallel builds are verified bit-identical to the sequential build.
 
 Nothing in the kernel is written from memory; the gate caught more than one subtle
 transcription (e.g. homogeneous back-substitution fills unconstrained rows with pseudorandom
@@ -121,7 +125,12 @@ assert!(f.contains(keys[0]));
 
 ```bash
 cargo test --all-features         # differential gate + property tests
+cargo test --no-default-features # serial-only feature configuration
+cargo clippy --all-features --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo deny --all-features check   # advisories, licenses, sources, dependency policy
 cargo bench --bench construct     # construction benchmark
+cargo +nightly fuzz run decode -- -max_total_time=30
 ./reproduce.sh                    # regenerate reference vectors + run gate + bench
 ```
 

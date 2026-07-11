@@ -14,4 +14,6 @@ for security reports. We aim to acknowledge within 3 business days.
 - **Deserialization is validated.** `from_bytes` rejects malformed, truncated, wrong-family,
   wrong-width, or corrupted buffers (checksum) and never triggers undefined behavior; report any
   input that panics or misbehaves as a bug.
-- **`no unsafe` except one bounds-checked prefetch** on x86_64; report any soundness concern.
+- **Unsafe code is confined to bounds-checked prefetches.** There is one prefetch site for each
+  filter family on x86_64. Both obtain the hinted address through `slice::get`, and Miri exercises
+  the serialization and batch-query paths with prefetch disabled; report any soundness concern.

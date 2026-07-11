@@ -15,20 +15,16 @@ Extracted semantics (file:line, verified 2026-07-10):
   the non-homogeneous path is bswap(h * kCoeffAndResultFactor) & mask — needed later for the
   w=128 standard config (kAltCoeffFactor1/2 = 0x876f170be4f1fcb9 / 0xf0433a4aecda4c5f for the
   smash path; kCoeffXor64 = 0xc367844a6e52731d for Hash<CoeffRow expansion).
-- OPEN QUESTION (do NOT guess): how the homogeneous FILTER query derives its expected result
-  bits (GetResultRowFromHash returns 0 for homogeneous, yet FPR ≈ 2^-r). Read
-  InterleavedSolutionStorage FilterQuery / PhsfQuery path in ribbon_impl.h + backsubst before
-  porting queries. The differential vectors will arbitrate.
+- Homogeneous FILTER queries expect a zero result row. Back-substitution fills unconstrained
+  rows deterministically from the hash, producing the expected ≈2^-r false-positive rate. This
+  is covered by byte-exact reference vectors and the statistical false-positive-rate test.
 - num_slots sizing (filterapi.h HomogRibbonFilter): overhead = 1 + (4 + 7*0.25)/(8*8);
   num_slots = InterleavedSoln::RoundUpNumSlots(overhead * n); read RoundUpNumSlots before
   porting.
 - Banding loop: ribbon_alg.h BandingAdd (:546-596) + BandingAddRange prefetch pipeline
   (:608-700). Backtracking unused for homogeneous.
 
-Next actions (test-first ladder step 1):
-1. tools/vecgen.cc — compile against the pinned headers with the e1b TS; emit JSON vectors:
-   per-key (key, h, start, coeff, resultrow) for 1000 keys (splitmix64 seed 0xA11CE), plus a
-   10K-key build's solution bytes FNV and query outcomes for 200 present/200 absent keys.
-   Commit vectors as tests/vectors/*.json.
-2. src/hash.rs written against those vectors (tests first, then impl).
-3. Then banding (gate: solution FNV), then queries (gate: outcomes + FPR), per README ladder.
+Port status: the vector generator and committed fixtures under `tests/vectors/` now cover the
+per-key hash/start/coefficient/result values, complete banding solutions, and present/absent
+query outcomes for both filter families. The Rust tests enforce those gates, construction-order
+identity, round trips, malformed-input rejection, and measured false-positive rates.
