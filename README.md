@@ -1,4 +1,16 @@
-# pleat
+```
+      ___           ___       ___           ___           ___     
+     /\  \         /\__\     /\  \         /\  \         /\  \    
+    /::\  \       /:/  /    /::\  \       /::\  \        \:\  \   
+   /:/\:\  \     /:/  /    /:/\:\  \     /:/\:\  \        \:\  \  
+  /::\~\:\  \   /:/  /    /::\~\:\  \   /::\~\:\  \       /::\  \ 
+ /:/\:\ \:\__\ /:/__/    /:/\:\ \:\__\ /:/\:\ \:\__\     /:/\:\__\
+ \/__\:\/:/  / \:\  \    \:\~\:\ \/__/ \/__\:\/:/  /    /:/  \/__/
+      \::/  /   \:\  \    \:\ \:\__\        \::/  /    /:/  /     
+       \/__/     \:\  \    \:\ \/__/        /:/  /     \/__/      
+                  \:\__\    \:\__\         /:/  /                 
+                   \/__/     \/__/         \/__/                  
+```
 
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
@@ -99,9 +111,9 @@ query outcomes — and the Rust tests assert byte-exact agreement:
 - queries reproduce the reference's present/absent outcomes;
 - pleated and parallel builds are verified bit-identical to the sequential build.
 
-Nothing in the kernel is written from memory; the gate caught more than one subtle
-transcription (e.g. homogeneous back-substitution fills unconstrained rows with pseudorandom
-data, not zero — the trick that preserves the false-positive rate).
+Nothing in the kernel is written from memory; several subtle transcription errors were
+caught, including the fact that homogeneous back-substitution fills unconstrained rows with
+pseudorandom data, not zero, which preserves the false-positive rate.
 
 ## Scope
 
