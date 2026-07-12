@@ -47,6 +47,29 @@ jobs:
       - name: Publish (dry run)
         run: cargo publish --all-features --locked --dry-run
 
+  preflight:
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
+      - name: Verify tag matches crate version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::Real publish must run from a version tag (e.g. v0.1.0), not a branch."
+            exit 1
+          fi
+          crate_ver=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate_ver" != "$tag" ]; then
+            echo "::error::Tag ($tag) does not match Cargo.toml version ($crate_ver)."
+            exit 1
+          fi
+
   publish:
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
@@ -73,18 +96,6 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: Package check
         run: cargo package --all-features --locked
-      - name: Verify tag matches crate version
-        run: |
-          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
-            echo "::error::Real publish must run from a version tag (e.g. v0.1.0), not a branch."
-            exit 1
-          fi
-          crate_ver=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$crate_ver" != "$tag" ]; then
-            echo "::error::Tag ($tag) does not match Cargo.toml version ($crate_ver)."
-            exit 1
-          fi
 
       - name: Publish to crates.io
         run: cargo publish --all-features --locked
