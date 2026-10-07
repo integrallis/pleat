@@ -14,10 +14,11 @@
 
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-Ribbon filters with **pleated construction** — a one-pass, cache-window reordering that builds
-space-optimal filters at close to Bloom-filter speed, and roughly twice as fast as building in
-arrival order at scale. An Integrallis project; companion to the paper *"Ribbon Catches Bloom:
-Pleated Construction at Bloom Speed."*
+Ribbon filters with **pleated construction**: a one-pass reordering into cache-sized windows that
+builds space-optimal filters roughly twice as fast as building in arrival order at scale. It
+narrows ribbon's build-cost gap to Bloom filters; it does not close it. An Integrallis project;
+companion to the paper *"Pleated Ribbon Construction: Approximate Sorting Recovers the Locality
+of a Full Sort"* ([research repository](https://github.com/integrallis/pleated-ribbon-construction)).
 
 Two filter families — homogeneous `RibbonFilter` (w=64) and standard `StdRibbon` (w=128, the
 RocksDB shape) — each with arrival / pleated / parallel construction (all bit-identical),
@@ -29,7 +30,9 @@ about 7.6 bits per key at a ~0.8% false-positive rate, well under a Bloom filter
 the same accuracy. The cost has always been construction: ribbon filters are built by solving a
 banded linear system, and doing that in arrival order makes every key a random jump through a
 table far larger than cache. Pleating groups keys into cache-sized windows with a single
-counting pass first, so the banding stays local.
+counting pass first, so the banding stays local. Sorting the keys approximately by start position
+is the ribbon authors' own step for homogeneous ribbon (Dietzfelbinger, Dillinger, Hübschle,
+Sanders and Walzer, J. ACM 73(1), 2026); pleating is a cache-sized implementation of it.
 
 ```rust
 use pleat::filter::RibbonFilter;
