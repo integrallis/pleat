@@ -142,7 +142,7 @@ impl<const R: usize> Ribbon<R> {
         self.soln.contains_batch(keys, out);
     }
 
-    /// Hint the CPU to load the memory a later [`Ribbon::contains`] for `key` will read first.
+    /// Hint the CPU to load every cache line a later [`Ribbon::contains`] for `key` can read.
     /// Lets a caller that spreads keys over several filters batch its own lookups: prefetch
     /// for every key, then query. Never changes a result; a no-op off x86_64.
     #[inline]
@@ -453,8 +453,8 @@ impl<const R: usize> StdRibbon<R> {
         self.soln.contains_batch(keys, out);
     }
 
-    /// Hint the CPU to load the memory a later [`StdRibbon::contains`] for `key` will read
-    /// first (see [`Ribbon::prefetch`]). Never changes a result; a no-op off x86_64.
+    /// Hint the CPU to load every cache line a later [`StdRibbon::contains`] for `key` can
+    /// read (see [`Ribbon::prefetch`]). Never changes a result; a no-op off x86_64.
     #[inline]
     pub fn prefetch(&self, key: u64) {
         self.soln.prefetch(key);
