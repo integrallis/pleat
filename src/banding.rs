@@ -154,6 +154,29 @@ impl<const R: usize> Solution<R> {
         }
     }
 
+    /// Hint the CPU to load the part of the solution that a later [`Self::contains`] for `key`
+    /// will read first. Has no effect on the result; a no-op off x86_64.
+    #[inline]
+    pub fn prefetch(&self, key: u64) {
+        let s = start(ribbon_hash(key, self.raw_seed), self.num_starts) as usize;
+        let seg = (s / W) * R;
+        // Bounds-checked: prefetch only a pointer that is genuinely in-bounds, so no
+        // wild pointer arithmetic even on a (validated but defensively re-checked) buffer.
+        #[cfg(all(target_arch = "x86_64", not(miri)))]
+        if let Some(p) = self.segments.get(seg) {
+            // SAFETY: `p` came from `slice::get`, so it is a valid in-bounds address;
+            // `_mm_prefetch` only uses it as a cache hint and does not dereference in Rust.
+            unsafe {
+                core::arch::x86_64::_mm_prefetch(
+                    p as *const _ as *const i8,
+                    core::arch::x86_64::_MM_HINT_T0,
+                );
+            }
+        }
+        #[cfg(any(not(target_arch = "x86_64"), miri))]
+        let _ = seg;
+    }
+
     /// Batch membership query with software prefetch: computes all target segments and
     /// prefetches them, then probes — hides memory latency for bulk lookups.
     pub fn contains_batch(&self, keys: &[u64], out: &mut [bool]) {
@@ -161,23 +184,7 @@ impl<const R: usize> Solution<R> {
         const STRIDE: usize = 32;
         for (kc, oc) in keys.chunks(STRIDE).zip(out.chunks_mut(STRIDE)) {
             for &k in kc {
-                let s = start(ribbon_hash(k, self.raw_seed), self.num_starts) as usize;
-                let seg = (s / W) * R;
-                // Bounds-checked: prefetch only a pointer that is genuinely in-bounds, so no
-                // wild pointer arithmetic even on a (validated but defensively re-checked) buffer.
-                #[cfg(all(target_arch = "x86_64", not(miri)))]
-                if let Some(p) = self.segments.get(seg) {
-                    // SAFETY: `p` came from `slice::get`, so it is a valid in-bounds address;
-                    // `_mm_prefetch` only uses it as a cache hint and does not dereference in Rust.
-                    unsafe {
-                        core::arch::x86_64::_mm_prefetch(
-                            p as *const _ as *const i8,
-                            core::arch::x86_64::_MM_HINT_T0,
-                        );
-                    }
-                }
-                #[cfg(any(not(target_arch = "x86_64"), miri))]
-                let _ = seg;
+                self.prefetch(k);
             }
             for (k, o) in kc.iter().zip(oc.iter_mut()) {
                 *o = self.contains(*k);

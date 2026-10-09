@@ -142,6 +142,14 @@ impl<const R: usize> Ribbon<R> {
         self.soln.contains_batch(keys, out);
     }
 
+    /// Hint the CPU to load the memory a later [`Ribbon::contains`] for `key` will read first.
+    /// Lets a caller that spreads keys over several filters batch its own lookups: prefetch
+    /// for every key, then query. Never changes a result; a no-op off x86_64.
+    #[inline]
+    pub fn prefetch(&self, key: u64) {
+        self.soln.prefetch(key);
+    }
+
     /// Estimated false-positive rate for this configuration, ~2^-R.
     pub fn false_positive_rate(&self) -> f64 {
         2f64.powi(-(R as i32))
@@ -237,6 +245,44 @@ impl<const R: usize> Ribbon<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn std_prefetch_is_only_a_hint() {
+        for n in [1u64, 1000, 200_000] {
+            let k: Vec<u64> = (0..n)
+                .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .collect();
+            let f = StdRibbon::<7>::from_keys(&k).unwrap();
+            let before: Vec<bool> = (0..2000u64).map(|i| f.contains(i)).collect();
+            for i in 0..2000u64 {
+                f.prefetch(i);
+                f.prefetch(u64::MAX - i);
+            }
+            let after: Vec<bool> = (0..2000u64).map(|i| f.contains(i)).collect();
+            assert_eq!(before, after);
+            assert!(k.iter().all(|&x| f.contains(x)));
+        }
+    }
+
+    #[test]
+    fn prefetch_is_only_a_hint() {
+        // Prefetching any key, present or not, on a large or a minimal filter, must not
+        // change what the filter answers.
+        for n in [0u64, 1, 1000, 200_000] {
+            let k: Vec<u64> = (0..n)
+                .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .collect();
+            let f = RibbonFilter::from_keys(&k);
+            let before: Vec<bool> = (0..2000u64).map(|i| f.contains(i)).collect();
+            for i in 0..2000u64 {
+                f.prefetch(i);
+                f.prefetch(u64::MAX - i);
+            }
+            let after: Vec<bool> = (0..2000u64).map(|i| f.contains(i)).collect();
+            assert_eq!(before, after);
+            assert!(k.iter().all(|&x| f.contains(x)));
+        }
+    }
     use crate::banding::solution_fnv;
 
     fn mix64(mut z: u64) -> u64 {
@@ -405,6 +451,13 @@ impl<const R: usize> StdRibbon<R> {
     /// Batch query with software prefetch, faster for bulk lookups.
     pub fn contains_batch(&self, keys: &[u64], out: &mut [bool]) {
         self.soln.contains_batch(keys, out);
+    }
+
+    /// Hint the CPU to load the memory a later [`StdRibbon::contains`] for `key` will read
+    /// first (see [`Ribbon::prefetch`]). Never changes a result; a no-op off x86_64.
+    #[inline]
+    pub fn prefetch(&self, key: u64) {
+        self.soln.prefetch(key);
     }
 
     /// Estimated false-positive rate for this configuration, ~2^-R.
