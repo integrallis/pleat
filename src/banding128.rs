@@ -210,10 +210,18 @@ impl<const R: usize> Solution128<R> {
         let cr_left = cr << start_bit;
         let cr_right = cr >> ((W128 - start_bit) % W128);
         let maybe = if start_bit != 0 { R } else { 0 };
+        // Two bounds checks for the whole query instead of two per column. The second block
+        // exists whenever the start bit is non-zero; when it is zero `hi` is `lo` and both
+        // masks are the unshifted row, so the OR below is just the first block's term.
+        let lo = &self.segments[seg..seg + R];
+        let hi = &self.segments[seg + maybe..seg + maybe + R];
         for i in 0..R {
-            let soln =
-                (self.segments[seg + i] & cr_left) | (self.segments[seg + maybe + i] & cr_right);
-            if (soln.count_ones() & 1) != ((expected >> i) & 1) {
+            let soln = (lo[i] & cr_left) | (hi[i] & cr_right);
+            // Parity of 128 bits: fold the halves, then one population count.
+            let parity = ((soln as u64) ^ ((soln >> 64) as u64)).count_ones() & 1;
+            // Stop at the first column that disagrees: an absent key is rejected after two
+            // columns on average, without touching the rest of the block.
+            if parity != ((expected >> i) & 1) {
                 return false;
             }
         }
