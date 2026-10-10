@@ -144,7 +144,7 @@ impl<const R: usize> Ribbon<R> {
 
     /// Hint the CPU to load every cache line a later [`Ribbon::contains`] for `key` can read.
     /// Lets a caller that spreads keys over several filters batch its own lookups: prefetch
-    /// for every key, then query. Never changes a result; a no-op off x86_64.
+    /// for every key, then query. Never changes a result; a no-op on architectures other than x86_64 and aarch64.
     #[inline]
     pub fn prefetch(&self, key: u64) {
         self.soln.prefetch(key);
@@ -454,7 +454,7 @@ impl<const R: usize> StdRibbon<R> {
     }
 
     /// Hint the CPU to load every cache line a later [`StdRibbon::contains`] for `key` can
-    /// read (see [`Ribbon::prefetch`]). Never changes a result; a no-op off x86_64.
+    /// read (see [`Ribbon::prefetch`]). Never changes a result; a no-op on architectures other than x86_64 and aarch64.
     #[inline]
     pub fn prefetch(&self, key: u64) {
         self.soln.prefetch(key);

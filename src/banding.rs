@@ -156,35 +156,23 @@ impl<const R: usize> Solution<R> {
 
     /// Hint the CPU to load every cache line of the solution that a later [`Self::contains`]
     /// for `key` can read: `R` segments in the start block and `R` in the next, `16 * R` bytes
-    /// in all (two lines at R=7, three at R=10). Has no effect on the result; a no-op off
-    /// x86_64.
+    /// in all (two lines at R=7, three at R=10). Has no effect on the result; a no-op on
+    /// architectures other than x86_64 and aarch64.
     #[inline]
     pub fn prefetch(&self, key: u64) {
         let s = start(ribbon_hash(key, self.raw_seed), self.num_starts) as usize;
         let seg = (s / W) * R;
         // One u64 segment is 8 bytes, so a 64-byte line holds eight. Touch one segment per
         // line, and the last one in case the span is not line-aligned.
-        #[cfg(all(target_arch = "x86_64", not(miri)))]
-        {
-            let last = seg + 2 * R - 1;
-            for i in (seg..last).step_by(8).chain(core::iter::once(last)) {
-                // Bounds-checked: prefetch only a pointer that is genuinely in-bounds, so no
-                // wild pointer arithmetic even on a (validated but defensively re-checked)
-                // buffer. The second block does not exist for a key in the last block.
-                if let Some(p) = self.segments.get(i) {
-                    // SAFETY: `p` came from `slice::get`, so it is a valid in-bounds address;
-                    // `_mm_prefetch` only uses it as a cache hint and does not dereference.
-                    unsafe {
-                        core::arch::x86_64::_mm_prefetch(
-                            p as *const _ as *const i8,
-                            core::arch::x86_64::_MM_HINT_T0,
-                        );
-                    }
-                }
+        let last = seg + 2 * R - 1;
+        for i in (seg..last).step_by(8).chain(core::iter::once(last)) {
+            // Bounds-checked: prefetch only an address that is genuinely in-bounds, so no
+            // wild pointer arithmetic even on a (validated but defensively re-checked)
+            // buffer. The second block does not exist for a key in the last block.
+            if let Some(p) = self.segments.get(i) {
+                crate::prefetch_read(p);
             }
         }
-        #[cfg(any(not(target_arch = "x86_64"), miri))]
-        let _ = seg;
     }
 
     /// Batch membership query with software prefetch: computes all target segments and

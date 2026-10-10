@@ -49,6 +49,33 @@ pub fn hash_key<K: Hash + ?Sized>(key: &K) -> u64 {
     core::hash::Hasher::finish(&h)
 }
 
+/// Hint the CPU to bring the cache line holding `*p` into the first-level cache for reading.
+/// Purely a hint: it reads nothing, cannot fault, and never changes a result.
+#[inline(always)]
+pub(crate) fn prefetch_read<T>(p: &T) {
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    // SAFETY: `p` is a valid reference, so the address is in-bounds; `_mm_prefetch` uses it
+    // only as a cache hint and does not dereference it.
+    unsafe {
+        core::arch::x86_64::_mm_prefetch(
+            p as *const T as *const i8,
+            core::arch::x86_64::_MM_HINT_T0,
+        );
+    }
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    // SAFETY: `prfm` is a hint instruction; it does not access memory architecturally, does
+    // not fault on any address, and touches no register, flag or stack.
+    unsafe {
+        core::arch::asm!(
+            "prfm pldl1keep, [{p}]",
+            p = in(reg) p as *const T,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    #[cfg(any(not(any(target_arch = "x86_64", target_arch = "aarch64")), miri))]
+    let _ = p;
+}
+
 /// A pleating plan: how a key stream is folded into table-window order.
 ///
 /// `shift` selects the window size in slots (`1 << shift`); the default configuration uses
