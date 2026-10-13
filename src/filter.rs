@@ -155,6 +155,19 @@ impl<const R: usize> Ribbon<R> {
         2f64.powi(-(R as i32))
     }
 
+    /// Hand the filter's storage to `relocate` and keep what it returns: the same values,
+    /// possibly at another address. For an allocator that defragments by moving live
+    /// allocations (Redis's active defragmentation is one): the caller asks it to move the
+    /// vector's buffer and rebuilds the vector around the new address. Lookups before and
+    /// after give the same answers.
+    ///
+    /// # Panics
+    ///
+    /// If the returned vector has another length. Its contents are not checked.
+    pub fn relocate_storage(&mut self, relocate: impl FnOnce(Vec<u64>) -> Vec<u64>) {
+        self.soln.relocate_storage(relocate);
+    }
+
     /// Serialized solution size in bytes (the queryable payload; keys are not stored).
     pub fn size_bytes(&self) -> usize {
         self.soln.segments().len() * 8
@@ -336,6 +349,61 @@ mod prod_tests {
     use super::*;
 
     #[test]
+    fn storage_can_be_moved_to_another_allocation() {
+        // An allocator that defragments moves live allocations. The filter hands its
+        // storage over and takes back the same contents at a new address.
+        let k: Vec<u64> = (0..50_000u64)
+            .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .collect();
+        let probes: Vec<u64> = (0..20_000u64)
+            .map(|i| i.wrapping_mul(0xD6E8_FEB8_6659_FD93))
+            .collect();
+
+        let mut f = StdRibbon::<9>::from_keys(&k).unwrap();
+        let (bytes, answers) = (
+            f.to_bytes(),
+            probes.iter().map(|&p| f.contains(p)).collect::<Vec<_>>(),
+        );
+        let mut moved_from = core::ptr::null();
+        f.relocate_storage(|old| {
+            moved_from = old.as_ptr();
+            let new = old.clone();
+            assert_ne!(new.as_ptr(), old.as_ptr());
+            new
+        });
+        assert!(!moved_from.is_null());
+        assert!(k.iter().all(|&x| f.contains(x)));
+        assert_eq!(
+            probes.iter().map(|&p| f.contains(p)).collect::<Vec<_>>(),
+            answers
+        );
+        assert_eq!(f.to_bytes(), bytes);
+
+        let mut h = Ribbon::<9>::from_keys(&k);
+        let (bytes, answers) = (
+            h.to_bytes(),
+            probes.iter().map(|&p| h.contains(p)).collect::<Vec<_>>(),
+        );
+        h.relocate_storage(|old| old.clone());
+        assert!(k.iter().all(|&x| h.contains(x)));
+        assert_eq!(
+            probes.iter().map(|&p| h.contains(p)).collect::<Vec<_>>(),
+            answers
+        );
+        assert_eq!(h.to_bytes(), bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "same length")]
+    fn relocated_storage_of_another_length_is_refused() {
+        let mut f = StdRibbon::<7>::from_keys(&[1, 2, 3]).unwrap();
+        f.relocate_storage(|mut old| {
+            old.pop();
+            old
+        });
+    }
+
+    #[test]
     fn empty_and_tiny_inputs_do_not_panic() {
         let f = RibbonFilter::from_keys(&[]);
         let _empty_probe = f.contains(12345);
@@ -464,6 +532,19 @@ impl<const R: usize> StdRibbon<R> {
     pub fn false_positive_rate(&self) -> f64 {
         2f64.powi(-(R as i32))
     }
+    /// Hand the filter's storage to `relocate` and keep what it returns: the same values,
+    /// possibly at another address. For an allocator that defragments by moving live
+    /// allocations (Redis's active defragmentation is one): the caller asks it to move the
+    /// vector's buffer and rebuilds the vector around the new address. Lookups before and
+    /// after give the same answers.
+    ///
+    /// # Panics
+    ///
+    /// If the returned vector has another length. Its contents are not checked.
+    pub fn relocate_storage(&mut self, relocate: impl FnOnce(Vec<u128>) -> Vec<u128>) {
+        self.soln.relocate_storage(relocate);
+    }
+
     /// Serialized payload size in bytes (keys are not stored).
     pub fn size_bytes(&self) -> usize {
         self.soln.segments().len() * 16

@@ -158,6 +158,22 @@ impl<const R: usize> Solution128<R> {
     pub fn segments(&self) -> &[u128] {
         &self.segments
     }
+
+    /// Hand the solution's storage to `relocate` and keep what it returns, which must be
+    /// the same values (at another address, if `relocate` moved them).
+    ///
+    /// # Panics
+    ///
+    /// If the returned vector has another length. Its contents are not checked.
+    pub fn relocate_storage(&mut self, relocate: impl FnOnce(Vec<u128>) -> Vec<u128>) {
+        let len = self.segments.len();
+        self.segments = relocate(core::mem::take(&mut self.segments));
+        assert_eq!(
+            self.segments.len(),
+            len,
+            "relocated storage must have the same length"
+        );
+    }
     #[cfg(test)]
     pub fn ordinal_seed(&self) -> u32 {
         self.ordinal_seed

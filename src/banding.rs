@@ -140,6 +140,22 @@ impl<const R: usize> Solution<R> {
         &self.segments
     }
 
+    /// Hand the solution's storage to `relocate` and keep what it returns, which must be
+    /// the same values (at another address, if `relocate` moved them).
+    ///
+    /// # Panics
+    ///
+    /// If the returned vector has another length. Its contents are not checked.
+    pub fn relocate_storage(&mut self, relocate: impl FnOnce(Vec<u64>) -> Vec<u64>) {
+        let len = self.segments.len();
+        self.segments = relocate(core::mem::take(&mut self.segments));
+        assert_eq!(
+            self.segments.len(),
+            len,
+            "relocated storage must have the same length"
+        );
+    }
+
     /// Borrow the serialization components: (num_starts, raw_seed, segments).
     pub(crate) fn parts(&self) -> (u64, u64, &[u64]) {
         (self.num_starts, self.raw_seed, &self.segments)
